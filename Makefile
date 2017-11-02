@@ -37,20 +37,14 @@ KERNEL = $(shell uname -s)
 
 # Then pick the right path for the precompiled SystemC Library
 ifeq ($(KERNEL),Darwin)
-    SYSTEMC_LIBDIR     = $(SYSTEMC_PATH)/lib-macosx
-endif
-ifeq ($(MACHINE_ARCH),sun4u)
+    SYSTEMC_LIBDIR     = $(SYSTEMC_PATH)/lib-macosx64
+else ifeq ($(MACHINE_ARCH),sun4u)
     SYSTEMC_LIBDIR     = $(SYSTEMC_PATH)/lib-gccsparcOS5
-endif
-ifeq ($(MACHINE_ARCH),i686)
+else ifeq ($(MACHINE_ARCH),i686)
     SYSTEMC_LIBDIR     = $(SYSTEMC_PATH)/lib-linux
-endif
-ifeq ($(MACHINE_ARCH),x86_64)
+else ifeq ($(MACHINE_ARCH),x86_64)
     SYSTEMC_LIBDIR     = $(SYSTEMC_PATH)/lib-linux64
 endif
-
-# Hardwired
-SYSTEMC_LIBDIR     = $(SYSTEMC_PATH)/lib-macosx64
 
 # Path settings
 SOURCE_PATH     = src
