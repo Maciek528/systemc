@@ -11,6 +11,8 @@ static const int MEM_SIZE = 512;
 static const int NUM_SETS = 128;
 static const int NUM_LINES = 8;
 static const int SET_SIZE = 256;
+static const int LRU_POSITION = NUM_LINES - 1;
+static const int MRU_POSITION = 0;
 
 SC_MODULE(Memory)
 {
@@ -92,6 +94,8 @@ private:
     }
 };
 
+
+
 SC_MODULE(Cache)
 {
 
@@ -109,43 +113,77 @@ public:
     };
 
     sc_in<bool>       Port_CLK;
-    sc_in<Function>   Port_Func_Cpu;
-    sc_in<int>        Port_Addr_Cpu;
-    sc_in<RetCode>    Port_Done_Mem;
-    sc_out<Function>  Port_Func_Mem;
-    sc_out<int>       Port_Addr_Mem;
-    sc_out<RetCode>   Port_Done_Cpu;
-    sc_inout_rv<32>   Port_Data;
+    sc_in<Function>   Port_CpuFunc;
+    sc_in<int>        Port_CpuAddr;
+    sc_in<RetCode>    Port_MemDone;
 
-    typedef struct {
-      bool  valid;
-      int   tag;
-      int   data;
-    } Cache_Line;
+    sc_out<Function>  Port_MemFunc;
+    sc_out<int>       Port_MemAddr;
+    sc_out<RetCode>   Port_CpuDone;
+
+    sc_inout_rv<32>   Port_CpuData;
+    sc_inout_rv<32>   Port_MemData;
+
+    class Line {
+      public:
+        bool  isValid;
+        int   tag;
+        int   data;
+
+        Line() {
+          isValid = false;
+          tag = 0;
+          data = 0;
+        }
+    };
+
+    class Set {
+      public:
+        bool linePresent;
+        Line line[NUM_LINES];
+        Set (){
+          linePresent = false;
+        };
+
+        int findTag (int tag){
+          for(int i=0 ; i<NUM_LINES ; i++){
+            if (line[i].tag == tag){
+              return i;
+            }
+          }
+          return -1;
+        }
+
+        // Shift all lines right up to the linePosition.
+        // If linePosition is LRU_POSITION then the entry is removed.
+        void shiftLines(int linePosition) {
+          for(int i = 0 ; i < linePosition ; i++) {
+            line[i+1] = line[i];
+          }
+        }
+    };
 
     SC_CTOR(Cache)
     {
+        Set set[NUM_SETS];
+        for (int i=0 ; i<NUM_SETS ; i++){
+          for (int j=0 ; j < NUM_LINES ; j++){
+            Line newLine;
+            set[i].line[j] = newLine;
+          }
+        }
+
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
         dont_initialize();
-
-        //construct cache
     }
 
-    // ~Cache()
-    // {
-    //     delete[] cache_data;
-    // }
-
 private:
-    // int* cache_data;
+    Set* set;
+    // Memory::Function  f;
 
     int getIndex (int address) {
       return address & 0xFE0;
-    }
-
-    int getOffset (int address) {
-      return address & 0xF1;
     }
 
     int getTag (int address) {
@@ -156,28 +194,37 @@ private:
     {
         while (true)
         {
-            wait(Port_Func_Cpu.value_changed_event());	// this is fine since we use sc_buffer
+            wait(Port_CpuFunc.value_changed_event());	// this is fine since we use sc_buffer
 
-            Function f = Port_Func_Cpu.read();
-            int addr   = Port_Addr_Cpu.read();
+            Function f = Port_CpuFunc.read();
+            int addr   = Port_CpuAddr.read();
+            Port_MemAddr.write(addr);
+            Port_MemFunc.write(f);
+
             int index  = getIndex(addr);
-            int offset = getOffset(addr);
             int tag    = getTag(addr);
             int data   = 0;
 
-            // currentSet = cache_data
+            Set currentSet = set[index];
+
+            // cout << set[index].linePresent << endl;
+
+            int linePosition = currentSet.findTag(tag);
+
+            if (linePosition > -1)
+            currentSet.linePresent = true;
+
+            Port_MemAddr.write(addr);
+            Port_MemFunc.write(f);
 
             if (f == FUNC_WRITE)
             {
                 cout << sc_time_stamp() << ": CACHE received write" << endl;
-                cout << "to address: " << addr << endl;
-                data = Port_Data.read().to_int();
-                cout << "data: " << data << endl;
+                data = Port_CpuData.read().to_int();
             }
             else
             {
                 cout << sc_time_stamp() << ": CACHE received read" << endl;
-                cout << "from address: " << addr << endl;
             }
 
             // This simulates memory read/write delay
@@ -186,18 +233,44 @@ private:
             if (f == FUNC_READ)
             {
 
-                // Port_Data.write( (addr < MEM_SIZE) ? cache_data[addr] : 0 );
-                Port_Done_Cpu.write( RET_READ_DONE );
+              //cache read hit
+              if(currentSet.linePresent) {
+                Line temp = currentSet.line[linePosition];
+                currentSet.shiftLines(linePosition);
+                currentSet.line[MRU_POSITION] = temp;
+              }
+              // cache read miss
+              else {
+                data = Port_MemData.read().to_int();
+                currentSet.shiftLines(LRU_POSITION);
+                currentSet.line[MRU_POSITION].data = data;
+                currentSet.line[MRU_POSITION].isValid = true;
+              }
+
+                Port_CpuDone.write( RET_READ_DONE );
                 wait();
-                Port_Data.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+                Port_CpuData.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
             }
-            else
+            else //writing
             {
-                if (addr < MEM_SIZE)
-                {
-                    // c_data[addr] = data;
+                // cache write hit
+                if (currentSet.linePresent) {
+                  ;
                 }
-                Port_Done_Cpu.write( RET_WRITE_DONE );
+                // cache write miss
+                else {
+                  if (currentSet.line[LRU_POSITION].isValid) {
+                    Port_MemData.write(data);
+                    wait();
+                    Port_MemData.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+                  }
+
+                  currentSet.shiftLines(LRU_POSITION);
+                  currentSet.line[MRU_POSITION].data = data;
+                  currentSet.line[MRU_POSITION].isValid = true;
+                }
+
+                Port_CpuDone.write( RET_WRITE_DONE );
             }
         }
     }
@@ -208,10 +281,10 @@ SC_MODULE(CPU)
 
 public:
     sc_in<bool>                 Port_CLK;
-    sc_in<Cache::RetCode>       Port_Done;
-    sc_out<Cache::Function>     Port_Func;
-    sc_out<int>                 Port_Addr;
-    sc_inout_rv<32>             Port_Data;
+    sc_in<Cache::RetCode>       Port_CacheDone;
+    sc_out<Cache::Function>     Port_CacheFunc;
+    sc_out<int>                 Port_CacheAddr;
+    sc_inout_rv<32>             Port_CacheData;
 
     SC_CTOR(CPU)
     {
@@ -269,28 +342,28 @@ private:
 
             if(tr_data.type != TraceFile::ENTRY_TYPE_NOP)
             {
-                Port_Addr.write(tr_data.addr);
-                Port_Func.write(f);
+                Port_CacheAddr.write(tr_data.addr);
+                Port_CacheFunc.write(f);
 
                 if (f == Cache::FUNC_WRITE)
                 {
                     cout << sc_time_stamp() << ": CPU sends write" << endl;
 
                     uint32_t data = rand();
-                    Port_Data.write(data);
+                    Port_CacheData.write(data);
                     wait();
-                    Port_Data.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+                    Port_CacheData.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
                 }
                 else
                 {
                     cout << sc_time_stamp() << ": CPU sends read" << endl;
                 }
 
-                wait(Port_Done.value_changed_event());
+                wait(Port_CacheDone.value_changed_event());
 
                 if (f == Cache::FUNC_READ)
                 {
-                    cout << sc_time_stamp() << ": CPU reads: " << Port_Data.read() << endl;
+                    cout << sc_time_stamp() << ": CPU reads: " << Port_CacheData.read() << endl;
                 }
             }
             else
@@ -347,20 +420,20 @@ int sc_main(int argc, char* argv[])
         mem.Port_Data(sigMemData);
         mem.Port_Done(sigMemDone);
 
-        cache.Port_Func_Mem(sigMemFunc);
-        cache.Port_Addr_Mem(sigMemAddr);
-        cache.Port_Data(sigMemData);
-        cache.Port_Done_Mem(sigMemDone);
+        cache.Port_MemFunc(sigMemFunc);
+        cache.Port_MemAddr(sigMemAddr);
+        cache.Port_MemData(sigMemData);
+        cache.Port_MemDone(sigMemDone);
 
-        cache.Port_Func_Cpu(sigCpuFunc);
-        cache.Port_Addr_Cpu(sigCpuAddr);
-        cache.Port_Data(sigCpuData);
-        cache.Port_Done_Cpu(sigCpuDone);
+        cache.Port_CpuFunc(sigCpuFunc);
+        cache.Port_CpuAddr(sigCpuAddr);
+        cache.Port_CpuData(sigCpuData);
+        cache.Port_CpuDone(sigCpuDone);
 
-        cpu.Port_Func(sigCpuFunc);
-        cpu.Port_Addr(sigCpuAddr);
-        cpu.Port_Data(sigCpuData);
-        cpu.Port_Done(sigCpuDone);
+        cpu.Port_CacheFunc(sigCpuFunc);
+        cpu.Port_CacheAddr(sigCpuAddr);
+        cpu.Port_CacheData(sigCpuData);
+        cpu.Port_CacheDone(sigCpuDone);
 
         cache.Port_CLK(clk);
         mem.Port_CLK(clk);
