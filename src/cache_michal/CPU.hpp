@@ -88,7 +88,9 @@ private:
           cout << sc_time_stamp() << ": CPU sends read" << endl;
         }
 
+
         wait(Port_MemDone.value_changed_event());
+
 
         if(f == Memory::FUNC_READ)
         {
