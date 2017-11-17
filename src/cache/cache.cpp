@@ -7,7 +7,6 @@ using namespace std;
 
 static const int NUM_SETS = 128;
 static const int NUM_LINES = 8;
-static const int LRU_POSITION = NUM_LINES - 1;
 static const int MRU_POSITION = 0;
 
 enum Function
@@ -22,6 +21,7 @@ enum RetCode
   RET_WRITE_DONE
 };
 
+double hitRate, missRate;
 
 SC_MODULE(Cache)
 {
@@ -32,15 +32,19 @@ public:
   sc_out<RetCode>   Port_CpuDone;
   sc_inout_rv<32>   Port_CpuData;
 
+  sc_out<int>        Port_Index;
+  sc_out<int>        Port_Tag;
+  sc_out<int>        Port_NumOfEntries;
+  sc_out<bool>       Port_ReadWrite;
+  sc_out<bool>       Port_HitMiss;
+
   class Line {
   public:
-    bool  isValid;
     int   tag;
     int   data;
 
     Line() {
-      isValid = false;
-      tag = 0;
+      tag = -1;
       data = 0;
     }
   };
@@ -62,7 +66,8 @@ public:
       return -1;
     }
 
-    // Shift all lines right up to the added line position. Remove from the LRU position.
+    /* Shift all lines right up to the added line position.
+    If the set is full, the entry from its last position is deleted. */
     void shiftLinesMiss(int numOfEntries) {
       for(int i = numOfEntries; i > 1 ; i--) {
         line[i-1] = line[i-2];
@@ -74,17 +79,18 @@ public:
       }
     }
 
+    /* Reorder functions move around lines in a set, depending on whether it's a hit or miss.
+     The first position in a set is always occupied by the MRU line.*/
     void reorderMiss(int numOfEntries, int tag, int data) {
       if (numOfEntries == 1){
         line[1] = line[0];
       } else {
         shiftLinesMiss(numOfEntries);
       }
-      line[MRU_POSITION].isValid = true;
       line[MRU_POSITION].tag = tag;
       line[MRU_POSITION].data = data;
       if (this->numOfEntries < NUM_LINES)
-        this->numOfEntries++;
+      this->numOfEntries++;
     }
 
     void reorderHit(int linePosition) {
@@ -119,6 +125,7 @@ private:
 
   void execute()
   {
+    // Build an array of sets, where each set is an array of lines.
     Set set[NUM_SETS];
     for (int i=0 ; i<NUM_SETS ; i++){
       for (int j=0 ; j<NUM_LINES ; j++){
@@ -142,35 +149,38 @@ private:
       int linePosition = set[index].findTag(tag);
       int numOfEntries = set[index].numOfEntries;
 
-      // cout << "linePosition: " << linePosition << endl;
-      // cout << "numOfEntries: " << numOfEntries << endl;
+      Port_Index.write(index);
+      Port_Tag.write(tag);
+      Port_NumOfEntries.write(numOfEntries);
 
       if (f == FUNC_WRITE)
       {
         cout << sc_time_stamp() << ": CACHE received write" << endl;
         data = Port_CpuData.read().to_int();
-
+        Port_ReadWrite.write(false);
       }
       else
       {
         cout << sc_time_stamp() << ": CACHE received read" << endl;
+        Port_ReadWrite.write(true);
       }
 
       if (f == FUNC_READ)
       {
         if (linePosition > -1) {
+          set[index].reorderHit(linePosition);
           cout << "READ HIT" << endl;
           stats_readhit(0);
-
-          set[index].reorderHit(linePosition);
-
+          Port_HitMiss.write(true);
+          hitRate++;
         }
         else {
+          wait(100); // simulate memory access penalty
+          set[index].reorderMiss(numOfEntries, tag, data);
           cout << "READ MISS" << endl;
           stats_readmiss(0);
-          wait(100); // simulate memory access penalty
-
-          set[index].reorderMiss(numOfEntries, tag, data);
+          Port_HitMiss.write(false);
+          missRate++;
         }
 
         Port_CpuDone.write( RET_READ_DONE );
@@ -179,27 +189,28 @@ private:
       else //writing
       {
         if (linePosition > -1) {
+          set[index].reorderHit(linePosition);
           cout << "WRITE HIT" << endl;
           stats_writehit(0);
-
-          set[index].reorderHit(linePosition);
+          Port_HitMiss.write(true);
+          hitRate++;
         }
         else {
+          if (numOfEntries == NUM_LINES) {
+            wait(100); // set is full => writeback
+          }
+          set[index].reorderMiss(numOfEntries, tag, data);
           cout << "WRITE MISS" << endl;
           stats_writemiss(0);
-
-          if (set[index].line[LRU_POSITION].isValid) {
-            wait(100); // writeback
-          }
-
-          set[index].reorderMiss(numOfEntries, tag, data);
+          Port_HitMiss.write(false);
+          missRate++;
         }
         wait();
         Port_CpuDone.write( RET_WRITE_DONE );
       }
 
       for (int i=0 ; i<NUM_LINES ; i++) {
-          cout << "Line : " << i << "   Tag: " << set[index].line[i].tag << "   Valid: " << set[index].line[MRU_POSITION].isValid << endl;
+        cout << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
       }
 
     }
@@ -270,7 +281,7 @@ private:
           uint32_t data = rand();
           Port_CacheData.write(data);
           wait();
-          // Port_CacheData.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+
         }
         else
         {
@@ -297,6 +308,7 @@ private:
 
     // Finished the Tracefile, now stop the simulation
     sc_stop();
+    cout << "Total runtime: " << sc_time_stamp() << endl;
   }
 };
 
@@ -322,6 +334,12 @@ int sc_main(int argc, char* argv[])
     sc_signal<int>        sigCpuAddr;
     sc_signal_rv<32>      sigCpuData;
 
+    sc_signal<int>        sigIndex;
+    sc_signal<int>        sigTag;
+    sc_signal<int>        sigNumOfEntries;
+    sc_signal<bool>       sigReadWrite;
+    sc_signal<bool>       sigHitMiss;
+
     // The clock that will drive the CPU and Cache
     sc_clock clk;
 
@@ -339,6 +357,25 @@ int sc_main(int argc, char* argv[])
     cpu.Port_CLK(clk);
     cache.Port_CLK(clk);
 
+    // signals for output trace
+    cache.Port_Index(sigIndex);
+    cache.Port_Tag(sigTag);
+    cache.Port_NumOfEntries(sigNumOfEntries);
+    cache.Port_ReadWrite(sigReadWrite);
+    cache.Port_HitMiss(sigHitMiss);
+
+    // Open VCD file
+    sc_trace_file *wf = sc_create_vcd_trace_file("cache_results");
+    sc_trace(wf, clk, "Clock");
+    sc_trace(wf, sigIndex, "Index");
+    sc_trace(wf, sigTag, "Tag");
+    sc_trace(wf, sigNumOfEntries, "NumOfEntries");
+    sc_trace(wf, sigReadWrite, "Read/Write");
+    sc_trace(wf, sigHitMiss, "Hit/Miss");
+
+    hitRate = 0;
+    missRate = 0;
+
     cout << "Running (press CTRL+C to interrupt)... " << endl;
 
     // Start Simulation
@@ -346,6 +383,10 @@ int sc_main(int argc, char* argv[])
 
     // Print statistics after simulation finished
     stats_print();
+    cout << endl;
+    cout << "Avarage mem access time:" << (hitRate + missRate * 100) / (hitRate + missRate) << endl;
+    cout << endl;
+    sc_close_vcd_trace_file(wf);
   }
 
   catch (exception& e)
