@@ -2,6 +2,8 @@
 #include <systemc.h>
 #include <iostream>
 #include <list>
+#include <vector>
+
 
 using namespace std;
 
@@ -209,9 +211,9 @@ private:
         Port_CpuDone.write( RET_WRITE_DONE );
       }
 
-      for (int i=0 ; i<NUM_LINES ; i++) {
-        cout << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
-      }
+      // for (int i=0 ; i<NUM_LINES ; i++) {
+      //   cout << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
+      // }
 
     }
   }
@@ -227,6 +229,12 @@ public:
   sc_out<Function>            Port_CacheFunc;
   sc_out<int>                 Port_CacheAddr;
   sc_inout_rv<32>             Port_CacheData;
+
+  int _pid;
+
+  void setPid (int pid) {
+    _pid = pid;
+  }
 
   SC_CTOR(CPU)
   {
@@ -245,11 +253,13 @@ private:
     while(!tracefile_ptr->eof())
     {
       // Get the next action for the processor in the trace
-      if(!tracefile_ptr->next(0, tr_data))
+      if(!tracefile_ptr->next(_pid, tr_data))
       {
         cerr << "Error reading trace for CPU" << endl;
         break;
       }
+
+      cout << "CPU " << _pid << " executing" << endl;
 
       switch(tr_data.type)
       {
@@ -320,12 +330,19 @@ int sc_main(int argc, char* argv[])
     // Get the tracefile argument and create Tracefile object
     // This function sets tracefile_ptr and num_cpus
     init_tracefile(&argc, &argv);
+    cout << "num of cups " << num_cpus << endl;
+    vector<CPU> cpus(num_cpus);
 
     // Initialize statistics counters
     stats_init();
 
     // Instantiate Modules
-    CPU    cpu("cpu");
+    for (int i=0 ; i<num_cpus ; i++){
+      CPU cpu("cpu");
+      cpu.setPid(i);
+      cpus[i] = cpu;
+    }
+    // CPU cpu("cpu");
     Cache  cache("cache");
 
     // Signals
@@ -349,12 +366,12 @@ int sc_main(int argc, char* argv[])
     cache.Port_CpuData(sigCpuData);
     cache.Port_CpuDone(sigCpuDone);
 
-    cpu.Port_CacheFunc(sigCpuFunc);
-    cpu.Port_CacheAddr(sigCpuAddr);
-    cpu.Port_CacheData(sigCpuData);
-    cpu.Port_CacheDone(sigCpuDone);
+    cpus[0].Port_CacheFunc(sigCpuFunc);
+    cpus[0].Port_CacheAddr(sigCpuAddr);
+    cpus[0].Port_CacheData(sigCpuData);
+    cpus[0].Port_CacheDone(sigCpuDone);
 
-    cpu.Port_CLK(clk);
+    cpus[0].Port_CLK(clk);
     cache.Port_CLK(clk);
 
     // signals for output trace
@@ -396,3 +413,4 @@ int sc_main(int argc, char* argv[])
 
   return 0;
 }
+[0]
