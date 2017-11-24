@@ -28,7 +28,8 @@
 
 # Location of the SystemC library files
 # SYSTEMC_PATH    = /afs/tu-berlin.de/units/Fak_IV/aes/tools/mca/systemc-2.3.0
-SYSTEMC_PATH    = /usr/local/systemc232
+# SYSTEMC_PATH    = /usr/local/systemc232
+SYSTEMC_PATH 			= /usr/local/systemc-2.3.0
 SYSTEMC_INCLUDE = $(SYSTEMC_PATH)/include
 
 # Figure out on what processor/architecture we compile
