@@ -3,12 +3,31 @@
 #include <iostream>
 #include <list>
 #include <fstream>
+#include <string>
+#include <vector>
+#include <cstdio>
 
 using namespace std;
 
 static const int NUM_SETS = 128;
 static const int NUM_LINES = 8;
 static const int MRU_POSITION = 0;
+
+sc_mutex traceFileMtx;
+sc_mutex doneProcessesMtx;
+
+int numProcessesDone = 0;
+int gNumProcesses;
+
+// Functions
+
+template<typename S>
+string to_string(S var)
+{
+  ostringstream temp;
+  temp << var;
+  return temp.str();
+};
 
 enum Function
 {
@@ -27,97 +46,108 @@ double hitRate, missRate;
 // Initialize logger object
 std::ofstream logger("logger.log", std::ios_base::out | std::ios_base::trunc);
 
-SC_MODULE(Cache)
+//SC_MODULE(Cache)
+class Cache : public sc_module
 {
 public:
-  sc_in<bool>       Port_CLK;
-  sc_out<RetCode>   Port_CpuDone;
-  sc_in<Function>   Port_CpuFunc;
-  sc_in<int>        Port_CpuAddr;
-  sc_inout_rv<32>   Port_CpuData;
+  // Clock
+    sc_in<bool>       Port_CLK;
 
-  sc_out<int>        Port_Index;
-  sc_out<int>        Port_Tag;
-  sc_out<int>        Port_NumOfEntries;
-  sc_out<bool>       Port_ReadWrite;
-  sc_out<bool>       Port_HitMiss;
+  // Ports to CPU
+    sc_out<RetCode>   Port_CpuDone;
+    sc_in<Function>   Port_CpuFunc;
+    sc_in<int>        Port_CpuAddr;
+    sc_inout_rv<32>   Port_CpuData;
 
-  class Line {
-  public:
-    int   tag;
-    int   data;
+  // Ports (tracefile)
+    sc_out<int>        Port_Index;
+    sc_out<int>        Port_Tag;
+    sc_out<int>        Port_NumOfEntries;
+    sc_out<bool>       Port_ReadWrite;
+    sc_out<bool>       Port_HitMiss;
 
-    Line() {
-      tag = -1;
-      data = 0;
-    }
-  };
+    // has to be added when no standard constructor SC_CTOR is used
+    SC_HAS_PROCESS(Cache);
 
-  class Set {
-  public:
-    int numOfEntries;
-    Line line[NUM_LINES];
-    Set (){
-      numOfEntries = 0;
+  // Inner Classes
+    class Line {
+    public:
+      int   tag;
+      int   data;
+
+      Line() {
+        tag = -1;
+        data = 0;
+      }
     };
 
-    int findTag (int tag) {
-      for(int i=0 ; i<NUM_LINES ; i++){
-        if (line[i].tag == tag){
-          return i;
+    class Set {
+    public:
+      int numOfEntries;
+      Line line[NUM_LINES];
+      Set (){
+        numOfEntries = 0;
+      };
+
+      int findTag (int tag) {
+        for(int i=0 ; i<NUM_LINES ; i++){
+          if (line[i].tag == tag){
+            return i;
+          }
+        }
+        return -1;
+      }
+
+      /* Shift all lines right up to the added line position.
+        If the set is full, the entry from its last position is deleted. */
+      void shiftLinesMiss(int numOfEntries) {
+        for(int i = numOfEntries; i > 1 ; i--) {
+          line[i-1] = line[i-2];
         }
       }
-      return -1;
-    }
+      void shiftLinesHit(int linePosition) {
+        for(int i = 0; i < linePosition-1 ; i++) {
+          line[i+1] = line[i];
+        }
+      }
 
-    /* Shift all lines right up to the added line position.
-    If the set is full, the entry from its last position is deleted. */
-    void shiftLinesMiss(int numOfEntries) {
-      for(int i = numOfEntries; i > 1 ; i--) {
-        line[i-1] = line[i-2];
+      /* Reorder functions move around lines in a set, depending on whether it's a hit or miss.
+        The first position in a set is always occupied by the MRU line.*/
+      void reorderMiss(int numOfEntries, int tag, int data) {
+        if (numOfEntries == 1){
+          line[1] = line[0];
+        } else {
+          shiftLinesMiss(numOfEntries);
+        }
+          line[MRU_POSITION].tag = tag;
+          line[MRU_POSITION].data = data;
+          if (this->numOfEntries < NUM_LINES)
+          this->numOfEntries++;
       }
-    }
-    void shiftLinesHit(int linePosition) {
-      for(int i = 0; i < linePosition-1 ; i++) {
-        line[i+1] = line[i];
-      }
-    }
 
-    /* Reorder functions move around lines in a set, depending on whether it's a hit or miss.
-     The first position in a set is always occupied by the MRU line.*/
-    void reorderMiss(int numOfEntries, int tag, int data) {
-      if (numOfEntries == 1){
-        line[1] = line[0];
-      } else {
-        shiftLinesMiss(numOfEntries);
+      void reorderHit(int linePosition) {
+        if (linePosition == 0) {
+          ;
+        }  else if (linePosition == 1) {
+          swap(line[MRU_POSITION], line [linePosition]);
+        } else {
+          Line temp = line[linePosition];
+          shiftLinesHit(linePosition);
+          line[MRU_POSITION] = temp;
+        }
       }
-      line[MRU_POSITION].tag = tag;
-      line[MRU_POSITION].data = data;
-      if (this->numOfEntries < NUM_LINES)
-      this->numOfEntries++;
-    }
-
-    void reorderHit(int linePosition) {
-      if (linePosition == 0) {
-        ;
-      } else if (linePosition == 1) {
-        swap(line[MRU_POSITION], line [linePosition]);
-      } else {
-        Line temp = line[linePosition];
-        shiftLinesHit(linePosition);
-        line[MRU_POSITION] = temp;
-      }
-    }
   };
 
-  SC_CTOR(Cache)
-  {
+  // Custom constructor
+  Cache(sc_module_name nm, int pid): sc_module(nm), pid_(pid) {
     SC_THREAD(execute);
     sensitive << Port_CLK.pos();
-    dont_initialize();
+    // Perhaps dont_initialize() can be executed
+    //dont_initialize();
   }
 
 private:
+  int pid_;
 
   int getIndex (int address) {
     return (address & 0x0000FE0) >> 5;
@@ -129,7 +159,7 @@ private:
 
   void execute()
   {
-    logger << "[Cache][execute] " << "start" << endl;
+    //logger << "[Cache" << pid_ << "][execute] " << "start" << endl;
     // Build an array of sets, where each set is an array of lines.
     Set set[NUM_SETS];
     for (int i=0 ; i<NUM_SETS ; i++){
@@ -149,7 +179,7 @@ private:
       int tag    = getTag(addr);
       int data   = 0;
 
-      cout << "Index: " << index << "   Tag: " << tag << endl;
+      //cout << "Index: " << index << "   Tag: " << tag << endl;
       //logger << "Index: " << index << "   Tag: " << tag << endl;
 
       int linePosition = set[index].findTag(tag);
@@ -161,7 +191,7 @@ private:
 
       if (f == FUNC_WRITE)
       {
-        cout << sc_time_stamp() << ": CACHE received write" << endl;
+        //cout << sc_time_stamp() << ": CACHE received write" << endl;
         //logger << sc_time_stamp() << ": CACHE received write" << endl;
 
         data = Port_CpuData.read().to_int();
@@ -169,7 +199,7 @@ private:
       }
       else
       {
-        cout << sc_time_stamp() << ": CACHE received read" << endl;
+        //cout << sc_time_stamp() << ": CACHE received read" << endl;
         //logger << sc_time_stamp() << ": CACHE received read" << endl;
 
         Port_ReadWrite.write(true);
@@ -179,18 +209,18 @@ private:
       {
         if (linePosition > -1) {
           set[index].reorderHit(linePosition);
-          cout << "READ HIT" << endl;
+          //cout << "READ HIT" << endl;
         //  logger << "READ HIT" << endl;
-          stats_readhit(0);
+          stats_readhit(pid_);
           Port_HitMiss.write(true);
           hitRate++;
         }
         else {
           wait(100); // simulate memory access penalty
           set[index].reorderMiss(numOfEntries, tag, data);
-          cout << "READ MISS" << endl;
+          //cout << "READ MISS" << endl;
         //  logger << "READ MISS" << endl;
-          stats_readmiss(0);
+          stats_readmiss(pid_);
           Port_HitMiss.write(false);
           missRate++;
         }
@@ -202,9 +232,9 @@ private:
       {
         if (linePosition > -1) {
           set[index].reorderHit(linePosition);
-          cout << "WRITE HIT" << endl;
+          //cout << "WRITE HIT" << endl;
           //logger << "WRITE HIT" << endl;
-          stats_writehit(0);
+          stats_writehit(pid_);
           Port_HitMiss.write(true);
           hitRate++;
         }
@@ -213,9 +243,9 @@ private:
             wait(100); // set is full => writeback
           }
           set[index].reorderMiss(numOfEntries, tag, data);
-          cout << "WRITE MISS" << endl;
+          //cout << "WRITE MISS" << endl;
           //logger << "WRITE MISS" << endl;
-          stats_writemiss(0);
+          stats_writemiss(pid_);
           Port_HitMiss.write(false);
           missRate++;
         }
@@ -224,7 +254,7 @@ private:
       }
 
       for (int i=0 ; i<NUM_LINES ; i++) {
-        cout << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
+        //cout << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
         //logger << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
       }
 
@@ -233,58 +263,86 @@ private:
 };
 
 
-SC_MODULE(CPU)
+//SC_MODULE(CPU)
+class CPU : public sc_module
 {
 
 public:
-  sc_in<bool>                 Port_CLK;
-  sc_in<RetCode>              Port_CacheDone;
-  sc_out<Function>            Port_CacheFunc;
-  sc_out<int>                 Port_CacheAddr;
-  sc_inout_rv<32>             Port_CacheData;
+  // Clock
+    sc_in<bool>                 Port_CLK;
 
-  SC_CTOR(CPU)
-  {
-    SC_THREAD(execute);
-    sensitive << Port_CLK.pos();
-    dont_initialize();
-  }
+  // Connection to Cache
+    sc_in<RetCode>              Port_CacheDone;
+    sc_out<Function>            Port_CacheFunc;
+    sc_out<int>                 Port_CacheAddr;
+    sc_inout_rv<32>             Port_CacheData;
+
+    // has to be added when no standard constructor SC_CTOR is used
+    SC_HAS_PROCESS(CPU);
+
+    // Custom constructor
+    CPU(sc_module_name name, int pid) : sc_module(name), pid_(pid)
+    {
+      iNumber_ = 0;
+      SC_THREAD(execute);
+      sensitive << Port_CLK.pos();
+    }
+
 
 private:
+  int pid_;
+  int iNumber_;
+  bool isDone_;
+
   void execute()
   {
-    logger << "[CPU][execute] " << "start" << endl;
+    //logger << "[CPU" << pid_ << "][execute] " << "start" << endl;
 
-    TraceFile::Entry    tr_data;
-    Function  f;
+    bool isDone_ = false;
 
-    // Loop until end of tracefile
-    while(!tracefile_ptr->eof())
-    {
-      // Get the next action for the processor in the trace
-      if(!tracefile_ptr->next(0, tr_data))
-      {
-        cerr << "Error reading trace for CPU" << endl;
-        break;
-      }
+     TraceFile::Entry    tr_data;
+     Function  f;
+     bool gotNext;
 
-      switch(tr_data.type)
-      {
-        case TraceFile::ENTRY_TYPE_READ:
-        f = FUNC_READ;
-        break;
+     // Loop until end of tracefile
+     traceFileMtx.lock();
+     bool endOfFile = tracefile_ptr->eof();
+     traceFileMtx.unlock();
+     //logger << "[CPU" << pid_ << "][execute] " << "got endOfFile" << endl;
 
-        case TraceFile::ENTRY_TYPE_WRITE:
-        f = FUNC_WRITE;
-        break;
 
-        case TraceFile::ENTRY_TYPE_NOP:
-        break;
+     while(!endOfFile)
+     {
+       // Get the next action for the processor in the trace
+       traceFileMtx.lock();
+       gotNext   = tracefile_ptr->next(pid_, tr_data);
+       traceFileMtx.unlock();
+       //logger << "[CPU" << pid_ << "][execute] " << "read instruction #" << iNumber_ << endl;
+       iNumber_++;
+       if(!gotNext)
+       {
+         cerr << "Error reading trace for CPU" << endl;
+         break;
+       }
 
-        default:
-        cerr << "Error, got invalid data from Trace" << endl;
-        exit(0);
-      }
+       switch(tr_data.type)
+       {
+         case TraceFile::ENTRY_TYPE_READ:
+         f = FUNC_READ;
+         break;
+
+         case TraceFile::ENTRY_TYPE_WRITE:
+         f = FUNC_WRITE;
+         break;
+
+         case TraceFile::ENTRY_TYPE_NOP:
+         break;
+
+         default:
+         cerr << "Error, got invalid data from Trace" << endl;
+         //logger << "[CPU" << pid_ << "] Error, got invalid data from Trace" << endl;
+         exit(0);
+       }
 
       if(tr_data.type != TraceFile::ENTRY_TYPE_NOP)
       {
@@ -293,7 +351,7 @@ private:
 
         if (f == FUNC_WRITE)
         {
-          cout << sc_time_stamp() << ": CPU sends write" << endl;
+          cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends write" << endl;
 
           uint32_t data = rand();
           Port_CacheData.write(data);
@@ -302,7 +360,7 @@ private:
         }
         else
         {
-          cout << sc_time_stamp() << ": CPU sends read" << endl;
+          cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends read" << endl;
         }
 
         // cout << "waiting" << endl;
@@ -311,145 +369,69 @@ private:
 
         if (f == FUNC_READ)
         {
-          cout << sc_time_stamp() << ": CPU reads: " << Port_CacheData.read() << endl;
+          cout << sc_time_stamp() << ": [CPU" << pid_ << "] reads: " << Port_CacheData.read() << endl;
         }
       }
       else
       {
-        cout << sc_time_stamp() << ": CPU executes NOP" << endl;
+        cout << sc_time_stamp() << ": [CPU" << pid_ << "] executes NOP" << endl;
       }
+
+      // chceck if end of file
+      endOfFile = tracefile_ptr->eof();
+
       // Advance one cycle in simulated time
       wait();
       cout << endl;
     }
 
-    // Finished the Tracefile, now stop the simulation
-    sc_stop();
-    cout << "Total runtime: " << sc_time_stamp() << endl;
+    if( !isDone_ )
+    {
+      doneProcessesMtx.lock();
+      numProcessesDone++;
+      doneProcessesMtx.unlock();
+      isDone_ = true;
+    }
+    if(numProcessesDone == gNumProcesses)
+    {
+      sc_stop();
+      logger << "Simulation stopped" << endl;
+      cout << "Total runtime: " << sc_time_stamp() << endl;
+    }
+
   }
 };
 
-SC_MODULE(ProcessingUnit)
+class ProcessingUnit : public sc_module
 {
 public:
+  // Clock
   sc_in<bool>       Port_CLK;
 
+  // Signals
+  sc_buffer<Function> sigCpuFunc;
+  sc_buffer<RetCode>  sigCpuDone;
+  sc_signal<int>      sigCpuAddr;
+  sc_signal_rv<32>    sigCpuData;
 
-  //sc_in<Function>   Port_CpuFunc;
-  //sc_in<int>        Port_CpuAddr;
-  //sc_out<RetCode>   Port_CpuDone;
-  //sc_inout_rv<32>   Port_CpuData;
+  // has to be added when no standard constructor SC_CTOR is used
+  SC_HAS_PROCESS(ProcessingUnit);
 
-  sc_signal<int>        sigIndex;
-  sc_signal<int>        sigTag;
-  sc_signal<int>        sigNumOfEntries;
-  sc_signal<bool>       sigReadWrite;
-  sc_signal<bool>       sigHitMiss;
-
-  CPU *cpu;
-  Cache *cache;
-
-  // // Signals
-  // sc_buffer<Function> sigCpuFunc;
-  // sc_buffer<RetCode>  sigCpuDone;
-  // sc_signal<int>      sigCpuAddr;
-  // sc_signal_rv<32>    sigCpuData;
-
-  //sc_out<int>        Port_Index;
-  //sc_out<int>        Port_Tag;
-  //sc_out<int>        Port_NumOfEntries;
-  //sc_out<bool>       Port_ReadWrite;
-  //sc_out<bool>       Port_HitMiss;
-
-  // class Line {
-  // public:
-  //   int   tag;
-  //   int   data;
-  //
-  //   Line() {
-  //     tag = -1;
-  //     data = 0;
-  //   }
-  // };
-  //
-  // class Set {
-  // public:
-  //   int numOfEntries;
-  //   Line line[NUM_LINES];
-  //   Set (){
-  //     numOfEntries = 0;
-  //   };
-  //
-  //   int findTag (int tag) {
-  //     for(int i=0 ; i<NUM_LINES ; i++){
-  //       if (line[i].tag == tag){
-  //         return i;
-  //       }
-  //     }
-  //     return -1;
-  //   }
-  //
-  //   /* Shift all lines right up to the added line position.
-  //   If the set is full, the entry from its last position is deleted. */
-  //   void shiftLinesMiss(int numOfEntries) {
-  //     for(int i = numOfEntries; i > 1 ; i--) {
-  //       line[i-1] = line[i-2];
-  //     }
-  //   }
-  //   void shiftLinesHit(int linePosition) {
-  //     for(int i = 0; i < linePosition-1 ; i++) {
-  //       line[i+1] = line[i];
-  //     }
-  //   }
-  //
-  //   /* Reorder functions move around lines in a set, depending on whether it's a hit or miss.
-  //    The first position in a set is always occupied by the MRU line.*/
-  //   void reorderMiss(int numOfEntries, int tag, int data) {
-  //     if (numOfEntries == 1){
-  //       line[1] = line[0];
-  //     } else {
-  //       shiftLinesMiss(numOfEntries);
-  //     }
-  //     line[MRU_POSITION].tag = tag;
-  //     line[MRU_POSITION].data = data;
-  //     if (this->numOfEntries < NUM_LINES)
-  //     this->numOfEntries++;
-  //   }
-  //
-  //   void reorderHit(int linePosition) {
-  //     if (linePosition == 0) {
-  //       ;
-  //     } else if (linePosition == 1) {
-  //       swap(line[MRU_POSITION], line [linePosition]);
-  //     } else {
-  //       Line temp = line[linePosition];
-  //       shiftLinesHit(linePosition);
-  //       line[MRU_POSITION] = temp;
-  //     }
-  //   }
-  // };
-
-  SC_CTOR(ProcessingUnit)
+  // Custom constructor
+  ProcessingUnit(sc_module_name name, int pid) : sc_module(name), pid_(pid)
   {
-    // Signals
-      sc_buffer<Function> sigCpuFunc;
-      sc_buffer<RetCode>  sigCpuDone;
-      sc_signal<int>      sigCpuAddr;
-      sc_signal_rv<32>    sigCpuData;
-
     // Create and patch CPU
-      cpu = new CPU("cpu");
+      cpu = new CPU("cpu", pid_);
 
       cpu->Port_CacheFunc(sigCpuFunc);
       cpu->Port_CacheAddr(sigCpuAddr);
       cpu->Port_CacheData(sigCpuData);
       cpu->Port_CacheDone(sigCpuDone);
       cpu->Port_CLK(Port_CLK);
-    logger << "cpu done" << endl;
-    //
+    logger << "[PU" << pid_ << "] cpu created" << endl;
 
     // Create and patch Cache
-      cache = new Cache("cache");
+      cache = new Cache("cache", pid_);
 
       cache->Port_CpuFunc(sigCpuFunc);
       cache->Port_CpuAddr(sigCpuAddr);
@@ -462,82 +444,45 @@ public:
       cache->Port_NumOfEntries(sigNumOfEntries);
       cache->Port_ReadWrite(sigReadWrite);
       cache->Port_HitMiss(sigHitMiss);
-    logger << "cache done" << endl;
+    logger << "[PU" << pid_ << "] cache created" << endl;
 
 
     SC_THREAD(execute);
-    logger << "thread started" << endl;
+    logger << "[PU" << pid_ << "] thread registered" << endl;
     sensitive << Port_CLK.pos();
-    dont_initialize();
+    // perhaps dont_initialize() can be executed
+    //dont_initialize();
   }
 
 private:
+  int pid_;
 
-  // CPU cpu("cpu");
-  // Cache cache("cache");
-  //
-  // // Signals
-  // sc_buffer<Function> sigCpuFunc;
-  // sc_buffer<RetCode>  sigCpuDone;
-  // sc_signal<int>      sigCpuAddr;
-  // sc_signal_rv<32>    sigCpuData;
-  //
-  // sc_signal<int>      sigIndex;
-  // sc_signal<int>      sigTag;
-  // sc_signal<int>      sigNumOfEntries;
-  // sc_signal<bool>     sigReadWrite;
-  // sc_signal<bool>     sigHitMiss;
-  //
-  // // The clock that will drive the CPU and cache
-  // sc_clock clk;
-  //
-  // // Connecting module ports with signals
-  // cache.Port_CpuFunc(sigCpuFunc);
-  // cache.Port_CpuAddr(sigCpuAddr);
-  // cache.Port_CpuData(sigCpuData);
-  // cache.Port_CpuDone(sigCpuDone);
-  //
-  //  cpu.Port_CacheFunc(sigCpuFunc);
-  //  cpu.Port_CacheAddr(sigCpuAddr);
-  //  cpu.Port_CacheData(sigCpuData);
-  //  cpu.Port_CacheDone(sigCpuDone);
-  //
-  //
-  //  cpu.Port_CLK(clk);
-  //  cache.Port_CLK(clk);
-  //
-  //
-  //  // signals for output trace
-  //  cache.Port_Index(sigIndex);
-  //  cache.Port_Tag(sigTag);
-  //  cache.Port_NumOfEntries(sigNumOfEntries);
-  //  cache.Port_ReadWrite(sigReadWrite);
-  //  cache.Port_HitMiss(sigHitMiss);
+  CPU *cpu;
+  Cache *cache;
 
-
-
-  // int getIndex (int address) {
-  //   return (address & 0x0000FE0) >> 5;
-  // }
-  //
-  // int getTag (int address) {
-  //   return (address & 0xFFFFF000) >> 12;
-  // }
+  sc_signal<int>        sigIndex;
+  sc_signal<int>        sigTag;
+  sc_signal<int>        sigNumOfEntries;
+  sc_signal<bool>       sigReadWrite;
+  sc_signal<bool>       sigHitMiss;
 
   void execute()
   {
-    logger << "[PU][execute] " << "start" << endl;
-
+    logger << "[PU" << pid_ << "] [execute] " << "start" << endl;
 
   }
 };
 
-
 int sc_main(int argc, char* argv[])
 {
+
+  // Variables
+  int num_procs = -1;
+
+
   try
   {
-    logger << "test" << endl;
+    logger << "[main] start" << endl;
 
     // Get the tracefile argument and create Tracefile object
     // This function sets tracefile_ptr and num_cpus
@@ -548,61 +493,32 @@ int sc_main(int argc, char* argv[])
     stats_init();
     logger << "[main] " << "stats inited" << endl;
 
-    // Instantiate Modules
-    //CPU    cpu("cpu");
-    //Cache  cache("cache");
+    num_procs = tracefile_ptr->get_proc_count();
+    gNumProcesses = num_procs;
 
-    // The clock that will drive the CPU and Cache
+    // The clock that will drive the PU's, CPU and Cache
     sc_clock clk;
 
+
     logger << "[main] " << "clock created" << endl;
+    logger << "[main] " << "num_proc: " << tracefile_ptr->get_proc_count() << endl;
 
-    ProcessingUnit processingUnit("pu");
+    // Create a vector of pointers to processing units
+    std::vector<ProcessingUnit*> processingUnits;
 
-    logger << "main" << "processingUnit created" << endl;
+    for( int i = 0; i < num_procs; i++ )
+    {
+      // Create processing unit with given PID
+      ProcessingUnit* processingUnit = new ProcessingUnit("pu", i);
+      processingUnit->Port_CLK(clk);
+      // Push into vector
+      processingUnits.push_back(processingUnit);
+    }
 
-    // Signals
-    // sc_buffer<Function>   sigCpuFunc;
-    // sc_buffer<RetCode>    sigCpuDone;
-    // sc_signal<int>        sigCpuAddr;
-    // sc_signal_rv<32>      sigCpuData;
-    //
-    // sc_signal<int>        sigIndex;
-    // sc_signal<int>        sigTag;
-    // sc_signal<int>        sigNumOfEntries;
-    // sc_signal<bool>       sigReadWrite;
-    // sc_signal<bool>       sigHitMiss;
-
-
-    // Connecting module ports with signals
-    // cache.Port_CpuFunc(sigCpuFunc);
-    // cache.Port_CpuAddr(sigCpuAddr);
-    // cache.Port_CpuData(sigCpuData);
-    // cache.Port_CpuDone(sigCpuDone);
-    //
-    //  cpu.Port_CacheFunc(sigCpuFunc);
-    //  cpu.Port_CacheAddr(sigCpuAddr);
-    //  cpu.Port_CacheData(sigCpuData);
-    //  cpu.Port_CacheDone(sigCpuDone);
-
-    //processingUnit.Port_CpuFunc(sigCpuFunc);
-    //processingUnit.Port_CpuAddr(sigCpuAddr);
-    //processingUnit.Port_PUData(sigCpuData);
-    //processingUnit.Port_PUDone(sigCpuDone);
-
-
-
-    // cpu.Port_CLK(clk);
-    // cache.Port_CLK(clk);
-
-
-
-    processingUnit.Port_CLK(clk);
+    logger << "[main] "  << "processingUnits created" << endl;
+    logger << "[main] "  << "processingUnits.size(): " << processingUnits.size() << endl;
 
     logger << "[main] " << "Processing unit patched with clock" << endl;
-
-
-
 
     // Open VCD file
     // sc_trace_file *wf = sc_create_vcd_trace_file("cache_results");
@@ -623,9 +539,6 @@ int sc_main(int argc, char* argv[])
 
     // Start Simulation
     sc_start();
-
-    logger << "[main] " << "simulation started" << endl;
-
 
     // Print statistics after simulation finished
     stats_print();
