@@ -29,10 +29,12 @@ string to_string(S var)
   return temp.str();
 };
 
+// Function type
 enum Function
 {
-  FUNC_READ,
-  FUNC_WRITE
+  F_INVALID,
+  F_READ,
+  F_WRITE,
 };
 
 enum RetCode
@@ -46,18 +48,148 @@ double hitRate, missRate;
 // Initialize logger object
 std::ofstream logger("logger.log", std::ios_base::out | std::ios_base::trunc);
 
+// Simple Bus interface
+class Bus_if : public virtual sc_interface
+{
+public:
+  virtual bool read(int writer, int addr) = 0;
+  virtual bool write(int writer, int addr, int data) = 0;
+};
+
+/* Bus class, provides a way to share one memory in multiple CPU + Caches. */
+class Bus : public Bus_if, public sc_module {
+public:
+
+    /* Ports andkkk  vb Signals. */
+    sc_in<bool> Port_CLK;
+    sc_out<Function> Port_BusValid;
+    sc_out<int> Port_BusWriter;
+
+    sc_signal_rv<32> Port_BusAddr;
+
+    /* Bus mutex. */
+    sc_mutex busMtx;
+
+    /* Variables. */
+    long waits;
+    long reads;
+    long writes;
+
+    // has to be added when no standard constructor SC_CTOR is used
+    SC_HAS_PROCESS(Bus);
+
+public:
+    /* Constructor. */
+    Bus(sc_module_name name) : sc_module(name)
+    {
+    //SC_CTOR(Bus) {
+        /* Handle Port_CLK to simulate delay */
+        sensitive << Port_CLK.pos();
+
+        // Initialize some bus properties
+        Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+
+        /* Update variables. */
+        waits = 0;
+        reads = 0;
+        writes = 0;
+    }
+
+    /* Perform a read access to memory addr for CPU #writer. */
+    virtual bool read(int writer, int addr){
+        /* Try to get exclusive lock on bus. */
+        while(busMtx.trylock() == -1){
+            /* Wait when bus is in contention. */
+            waits++;
+            wait();
+        }
+
+        /* Update number of bus accesses. */
+        reads++;
+
+        /* Set lines. */
+        Port_BusAddr.write(addr);
+        Port_BusWriter.write(writer);
+        Port_BusValid.write(F_READ);
+
+        /* Wait for everyone to recieve. */
+        wait();
+
+        /* Reset. */
+        Port_BusValid.write(F_INVALID);
+        Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+        busMtx.unlock();
+
+        return(true);
+    };
+
+    /* Write action to memory, need to know the writer, address and data. */
+    virtual bool write(int writer, int addr, int data){
+        /* Try to get exclusive lock on the bus. */
+        while(busMtx.trylock() == -1){
+            waits++;
+            wait();
+        }
+
+        /* Update number of accesses. */
+        writes++;
+
+        /* Set. */
+        Port_BusAddr.write(addr);
+        Port_BusWriter.write(writer);
+        Port_BusValid.write(F_WRITE);
+
+        /* Wait for everyone to recieve. */
+        wait();
+
+        /* Reset. */
+        Port_BusValid.write(F_INVALID);
+        Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+        busMtx.unlock();
+
+        return(true);
+    }
+
+    /* Bus output. */
+    void output(){
+        /* Write output as specified in the assignment. */
+        double avg = (double)waits / double(reads + writes);
+        printf("\n 2. Main memory access rates\n");
+        printf("    Bus had %ld reads and %ld writes.\n", reads, writes);
+        printf("    A total of %ld accesses.\n", reads + writes);
+        printf("\n 3. Average time for bus acquisition\n");
+        printf("    There were %ld waits for the bus.\n", waits);
+        printf("    Average waiting time per access: %f cycles.\n", avg);
+    }
+};
+
 //SC_MODULE(Cache)
 class Cache : public sc_module
 {
 public:
+  // Possible line states depending on the cache coherence protocol
+  enum Line_State
+  {
+    INVALID,
+    VALID,
+  };
+
   // Clock
     sc_in<bool>       Port_CLK;
 
   // Ports to CPU
-    sc_out<RetCode>   Port_CpuDone;
     sc_in<Function>   Port_CpuFunc;
     sc_in<int>        Port_CpuAddr;
+    sc_out<RetCode>   Port_CpuDone;
     sc_inout_rv<32>   Port_CpuData;
+
+  // Bus snooping ports
+  sc_in_rv<32>        Port_BusAddr;
+  sc_in<int>          Port_BusWriter;
+  sc_in<Function>     Port_BusValid;
+
+  // Bus requests ports
+  sc_port<Bus_if>     Port_Bus;
 
   // Ports (tracefile)
     sc_out<int>        Port_Index;
@@ -140,6 +272,7 @@ public:
 
   // Custom constructor
   Cache(sc_module_name nm, int pid): sc_module(nm), pid_(pid) {
+    SC_THREAD(bus);
     SC_THREAD(execute);
     sensitive << Port_CLK.pos();
     // Perhaps dont_initialize() can be executed
@@ -156,6 +289,35 @@ private:
   int getTag (int address) {
     return (address & 0xFFFFF000) >> 12;
   }
+
+  /* Thread that handles the bus. */
+    void bus()
+    {
+        //int f = 0;
+
+        /* Continue while snooping is activated. */
+        while(true)
+        {
+            /* Wait for work. */
+            wait(Port_BusValid.value_changed_event());
+
+            /* Possibilities. */
+            switch(Port_BusValid.read())
+            {
+              case F_READ:
+
+                break;
+              case F_WRITE:
+                break;
+              case F_INVALID:
+                break;
+		// your code of what to do while snooping the bus
+		// keep in mind that a certain cache should distinguish between bus requests made by itself and requests made by other caches.
+		// count and report the total number of read/write operations on the bus, in which the desired address (by other caches) is found in the snooping cache (probe read hits and probe write hits).
+
+	    }
+        }
+    }
 
   void execute()
   {
@@ -189,7 +351,7 @@ private:
       Port_Tag.write(tag);
       Port_NumOfEntries.write(numOfEntries);
 
-      if (f == FUNC_WRITE)
+      if (f == F_WRITE)
       {
         //cout << sc_time_stamp() << ": CACHE received write" << endl;
         //logger << sc_time_stamp() << ": CACHE received write" << endl;
@@ -205,7 +367,7 @@ private:
         Port_ReadWrite.write(true);
       }
 
-      if (f == FUNC_READ)
+      if (f == F_READ)
       {
         if (linePosition > -1) {
           set[index].reorderHit(linePosition);
@@ -328,14 +490,15 @@ private:
        switch(tr_data.type)
        {
          case TraceFile::ENTRY_TYPE_READ:
-         f = FUNC_READ;
+         f = F_READ;
          break;
 
          case TraceFile::ENTRY_TYPE_WRITE:
-         f = FUNC_WRITE;
+         f = F_WRITE;
          break;
 
          case TraceFile::ENTRY_TYPE_NOP:
+         f = F_INVALID;
          break;
 
          default:
@@ -349,7 +512,7 @@ private:
         Port_CacheAddr.write(tr_data.addr);
         Port_CacheFunc.write(f);
 
-        if (f == FUNC_WRITE)
+        if (f == F_WRITE)
         {
           cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends write" << endl;
 
@@ -367,7 +530,7 @@ private:
         wait(Port_CacheDone.value_changed_event());
         // cout << "value changed" << endl;
 
-        if (f == FUNC_READ)
+        if (f == F_READ)
         {
           cout << sc_time_stamp() << ": [CPU" << pid_ << "] reads: " << Port_CacheData.read() << endl;
         }
@@ -405,6 +568,10 @@ private:
 class ProcessingUnit : public sc_module
 {
 public:
+
+  CPU *cpu;
+  Cache *cache;
+
   // Clock
   sc_in<bool>       Port_CLK;
 
@@ -437,6 +604,7 @@ public:
       cache->Port_CpuAddr(sigCpuAddr);
       cache->Port_CpuData(sigCpuData);
       cache->Port_CpuDone(sigCpuDone);
+  //    cache->Port_BusFunc(sigBusFunc);
       cache->Port_CLK(Port_CLK);
       // signals for output trace
       cache->Port_Index(sigIndex);
@@ -457,8 +625,6 @@ public:
 private:
   int pid_;
 
-  CPU *cpu;
-  Cache *cache;
 
   sc_signal<int>        sigIndex;
   sc_signal<int>        sigTag;
@@ -503,6 +669,19 @@ int sc_main(int argc, char* argv[])
     logger << "[main] " << "clock created" << endl;
     logger << "[main] " << "num_proc: " << tracefile_ptr->get_proc_count() << endl;
 
+    // Create sc_buffer for connection between bus and caches
+    sc_signal<int>        sigBusWriter;
+    sc_signal<Function>   sigBusValid;
+
+    // Create Bus
+    Bus         bus("bus");
+    bus.Port_CLK(clk);
+
+    // General Bus Signals
+    bus.Port_BusWriter(sigBusWriter);
+    bus.Port_BusValid(sigBusValid);
+
+
     // Create a vector of pointers to processing units
     std::vector<ProcessingUnit*> processingUnits;
 
@@ -511,6 +690,11 @@ int sc_main(int argc, char* argv[])
       // Create processing unit with given PID
       ProcessingUnit* processingUnit = new ProcessingUnit("pu", i);
       processingUnit->Port_CLK(clk);
+      // try to patch Caches that are in PUs
+      processingUnit->cache->Port_BusAddr(bus.Port_BusAddr);
+      processingUnit->cache->Port_BusWriter(sigBusWriter);
+      processingUnit->cache->Port_BusValid(sigBusValid);
+      processingUnit->cache->Port_Bus(bus);
       // Push into vector
       processingUnits.push_back(processingUnit);
     }
