@@ -25,13 +25,13 @@ int gNumProcesses;
 
 // Functions
 
-template<typename S>
-string to_string(S var)
-{
-  ostringstream temp;
-  temp << var;
-  return temp.str();
-};
+// template<typename S>
+// string to_string(S var)
+// {
+//   ostringstream temp;
+//   temp << var;
+//   return temp.str();
+// };
 
 // Function type
 enum Function

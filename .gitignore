@@ -1,0 +1,5 @@
+*.bin
+*.vcd
+*.sh
+*.log
+Makefile
