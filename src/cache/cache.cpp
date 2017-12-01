@@ -7,6 +7,9 @@
 #include <vector>
 #include <cstdio>
 
+#define SC_DEFAULT_WRITER_POLICY SC_MANY_WRITERS
+
+
 using namespace std;
 
 static const int NUM_SETS = 128;
@@ -15,6 +18,7 @@ static const int MRU_POSITION = 0;
 
 sc_mutex traceFileMtx;
 sc_mutex doneProcessesMtx;
+sc_mutex testMtx;
 
 int numProcessesDone = 0;
 int gNumProcesses;
@@ -60,7 +64,7 @@ public:
 class Bus : public Bus_if, public sc_module {
 public:
 
-    /* Ports andkkk  vb Signals. */
+    /* Ports and Signals. */
     sc_in<bool> Port_CLK;
     sc_out<Function> Port_BusValid;
     sc_out<int> Port_BusWriter;
@@ -82,7 +86,6 @@ public:
     /* Constructor. */
     Bus(sc_module_name name) : sc_module(name)
     {
-    //SC_CTOR(Bus) {
         /* Handle Port_CLK to simulate delay */
         sensitive << Port_CLK.pos();
 
@@ -293,6 +296,8 @@ private:
   /* Thread that handles the bus. */
     void bus()
     {
+      logger << "[Cache" << pid_ << "][bus] start" << endl;
+
         //int f = 0;
 
         /* Continue while snooping is activated. */
@@ -300,6 +305,7 @@ private:
         {
             /* Wait for work. */
             wait(Port_BusValid.value_changed_event());
+            logger << "[Cache" << pid_ << "][bus] noticed an event" << endl;
 
             /* Possibilities. */
             switch(Port_BusValid.read())
@@ -358,6 +364,7 @@ private:
 
         data = Port_CpuData.read().to_int();
         Port_ReadWrite.write(false);
+
       }
       else
       {
@@ -371,6 +378,7 @@ private:
       {
         if (linePosition > -1) {
           set[index].reorderHit(linePosition);
+          // leave the bus alone
           //cout << "READ HIT" << endl;
         //  logger << "READ HIT" << endl;
           stats_readhit(pid_);
@@ -380,6 +388,13 @@ private:
         else {
           wait(100); // simulate memory access penalty
           set[index].reorderMiss(numOfEntries, tag, data);
+          // take the data from the bus
+          while(testMtx.trylock() == -1)
+          {
+            wait();
+          }
+          Port_Bus->read(pid_, addr);
+          testMtx.unlock();
           //cout << "READ MISS" << endl;
         //  logger << "READ MISS" << endl;
           stats_readmiss(pid_);
@@ -405,8 +420,16 @@ private:
             wait(100); // set is full => writeback
           }
           set[index].reorderMiss(numOfEntries, tag, data);
+          while(testMtx.trylock() == -1)
+          {
+            wait();
+          }
+          Port_Bus->write(pid_, addr, data);
+          testMtx.unlock();
           //cout << "WRITE MISS" << endl;
           //logger << "WRITE MISS" << endl;
+          //Port_Bus.write(F_WRITE);
+          //Port_Bus->read(pid_, addr);
           stats_writemiss(pid_);
           Port_HitMiss.write(false);
           missRate++;
@@ -677,7 +700,7 @@ int sc_main(int argc, char* argv[])
     Bus         bus("bus");
     bus.Port_CLK(clk);
 
-    // General Bus Signals
+    // General Port_BusBus Signals
     bus.Port_BusWriter(sigBusWriter);
     bus.Port_BusValid(sigBusValid);
 
