@@ -7,7 +7,8 @@
 #include <vector>
 #include <cstdio>
 
-#define SC_DEFAULT_WRITER_POLICY SC_MANY_WRITERS
+//#define SC_DEFAULT_WRITER_POLICY SC_MANY_WRITERS
+//#define SC_SIGNAL_WRITE_CHECK DISABLE
 
 
 using namespace std;
@@ -18,20 +19,19 @@ static const int MRU_POSITION = 0;
 
 sc_mutex traceFileMtx;
 sc_mutex doneProcessesMtx;
-sc_mutex testMtx;
 
 int numProcessesDone = 0;
 int gNumProcesses;
 
 // Functions
 
-// template<typename S>
-// string to_string(S var)
-// {
-//   ostringstream temp;
-//   temp << var;
-//   return temp.str();
-// };
+template<typename S>
+string to_string(S var)
+{
+  ostringstream temp;
+  temp << var;
+  return temp.str();
+};
 
 // Function type
 enum Function
@@ -305,18 +305,26 @@ private:
         {
             /* Wait for work. */
             wait(Port_BusValid.value_changed_event());
-            logger << "[Cache" << pid_ << "][bus] noticed an event" << endl;
+            int caller = Port_BusWriter.read();
 
             /* Possibilities. */
+            if(caller != pid_)
+            {
             switch(Port_BusValid.read())
             {
               case F_READ:
+              logger << "[Cache" << pid_ << "][bus] noticed READ from " << caller << endl;
 
                 break;
               case F_WRITE:
+              logger << "[Cache" << pid_ << "][bus] noticed WRITE from " << caller << endl;
+
                 break;
               case F_INVALID:
+              logger << "[Cache" << pid_ << "][bus] noticed NOP from " << caller << endl;
+
                 break;
+              }
 		// your code of what to do while snooping the bus
 		// keep in mind that a certain cache should distinguish between bus requests made by itself and requests made by other caches.
 		// count and report the total number of read/write operations on the bus, in which the desired address (by other caches) is found in the snooping cache (probe read hits and probe write hits).
@@ -389,12 +397,9 @@ private:
           wait(100); // simulate memory access penalty
           set[index].reorderMiss(numOfEntries, tag, data);
           // take the data from the bus
-          while(testMtx.trylock() == -1)
-          {
-            wait();
-          }
+
           Port_Bus->read(pid_, addr);
-          testMtx.unlock();
+
           //cout << "READ MISS" << endl;
         //  logger << "READ MISS" << endl;
           stats_readmiss(pid_);
@@ -420,12 +425,9 @@ private:
             wait(100); // set is full => writeback
           }
           set[index].reorderMiss(numOfEntries, tag, data);
-          while(testMtx.trylock() == -1)
-          {
-            wait();
-          }
-          Port_Bus->write(pid_, addr, data);
-          testMtx.unlock();
+
+          //Port_Bus->write(pid_, addr, data);
+
           //cout << "WRITE MISS" << endl;
           //logger << "WRITE MISS" << endl;
           //Port_Bus.write(F_WRITE);
@@ -693,8 +695,8 @@ int sc_main(int argc, char* argv[])
     logger << "[main] " << "num_proc: " << tracefile_ptr->get_proc_count() << endl;
 
     // Create sc_buffer for connection between bus and caches
-    sc_signal<int>        sigBusWriter;
-    sc_signal<Function>   sigBusValid;
+    sc_signal<int, SC_MANY_WRITERS>        sigBusWriter;
+    sc_signal<Function, SC_MANY_WRITERS>   sigBusValid;
 
     // Create Bus
     Bus         bus("bus");
@@ -711,7 +713,9 @@ int sc_main(int argc, char* argv[])
     for( int i = 0; i < num_procs; i++ )
     {
       // Create processing unit with given PID
-      ProcessingUnit* processingUnit = new ProcessingUnit("pu", i);
+      string name = "pu"+to_string(i);
+
+      ProcessingUnit* processingUnit = new ProcessingUnit(name.c_str(), i);
       processingUnit->Port_CLK(clk);
       // try to patch Caches that are in PUs
       processingUnit->cache->Port_BusAddr(bus.Port_BusAddr);
