@@ -69,7 +69,7 @@ public:
     sc_out<Function> Port_BusValid;
 
     sc_signal_rv<32> Port_BusAddr;
-    sc_signal_rv<32> Port_BusWriter;
+    sc_out<int> Port_BusWriter;
 
 
 
@@ -103,7 +103,7 @@ public:
     /* Perform a read access to memory addr for CPU #writer. */
     virtual bool read(int writer, int addr){
         /* Try to get exclusive lock on bus. */
-        cout<<"TRY to lock for READ, CPU"<<writer<<endl;
+        logger<<endl<< "--> CORE "<< writer <<" try to Lock BUS for READ  -->"<<endl;
         while(busMtx.trylock() == -1){
             /* Wait when bus is in contention. */
             waits++;
@@ -111,9 +111,8 @@ public:
         }
         /* Update number of bus accesses. */
         reads++;
-
+        logger << "--> CORE "<< writer <<" LOCK for READ"<<endl;
         /* Set lines. */
-        cout<<"I lock the bus for READ, CPU"<<writer<<endl;
         Port_BusAddr.write(addr);
         Port_BusWriter.write(writer);
         Port_BusValid.write(F_READ);
@@ -124,14 +123,14 @@ public:
        // Port_BusValid.write(F_INVALID);
         Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
         busMtx.unlock();
-        cout<<"I UNlock the bus for READ, CPU"<<writer<<endl;
+        logger << "--> CORE "<< writer << " UNLOCK for READ"<<endl;
         return(true);
     };
 
     /* Write action to memory, need to know the writer, address and data. */
     virtual bool write(int writer, int addr, int data){
         /* Try to get exclusive lock on the bus. */
-        cout<<"TRY to lock for WRITE, CPU"<<writer<<endl;
+        logger<<endl<< "--> CORE "<< writer <<" try to Lock BUS for WRITE  -->"<<endl;
         while(busMtx.trylock() == -1){
             waits++;
             wait();
@@ -139,7 +138,7 @@ public:
 
         /* Update number of accesses. */
         writes++;
-        cout<<"I lock the bus for WRITE, CPU"<<writer<<endl;
+        logger << "--> CORE "<< writer <<"L OCK for WRITE"<<endl;
         /* Set. */
         Port_BusAddr.write(addr);
         Port_BusWriter.write(writer);
@@ -152,7 +151,7 @@ public:
         //Port_BusValid.write(F_INVALID);
         Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
         busMtx.unlock();
-        cout<<"I UNlock the bus for WRITE, CPU"<<writer<<endl;
+        logger << "--> CORE "<< writer << " UNLOCK for WRITE"<<endl;
         return(true);
     }
 
@@ -191,7 +190,7 @@ public:
 
     // Bus snooping ports
     sc_in_rv<32>        Port_BusAddr;
-    sc_in_rv<32>       Port_BusWriter;
+    sc_in<int>       Port_BusWriter;
     sc_in<Function>     Port_BusValid;
 
     // Bus requests ports
@@ -324,7 +323,7 @@ private:
             wait(Port_BusValid.value_changed_event());
             logger << "[Cache" << pid_ << "][bus] noticed an event" << endl;
 
-            int BusCoreId = Port_BusWriter.read().to_uint();
+            int BusCoreId = Port_BusWriter.read();
 
             if(pid_ == BusCoreId)  //When the same Core is snooping nothing have to do be done
                 continue;
@@ -342,7 +341,7 @@ private:
                 case F_WRITE:
                 case F_INVALID:
                     set_[index].line[linePosition].valid = false;
-                    logger <<"***************"<<endl<< "Bus Read/Write happen." << endl<<"This Core is "<<pid_<<"  index / line"<<index<<" / "<<linePosition<<endl<<"Bus core is "<< Port_BusWriter.read().to_uint()<<endl;
+                    logger <<"***************"<<endl<< "Bus Read/Write happen." << endl<<"This Core is "<<pid_<<" - index / line = "<<index<<" / "<<linePosition<<endl<<"  -Bus core is "<< Port_BusWriter.read()<<endl;
                     break;
                     // your code of what to do while snooping the bus
                     // keep in mind that a certain cache should distinguish between bus requests made by itself and requests made by other caches.
@@ -746,7 +745,7 @@ int sc_main(int argc, char* argv[])
 
         // Create sc_buffer for connection between bus and caches
         // sc_signal<int>        sigBusWriter;
-        //sc_signal<Function>   sigBusValid;
+        sc_buffer<int, SC_MANY_WRITERS >   sigBusWriter;
         sc_buffer<Function, SC_MANY_WRITERS> sigBusValid;
 
         // Create Bus
@@ -754,7 +753,7 @@ int sc_main(int argc, char* argv[])
         bus.Port_CLK(clk);
 
         // General Port_BusBus Signals
-        // bus.Port_BusWriter(sigBusWriter);
+        bus.Port_BusWriter(sigBusWriter);
         bus.Port_BusValid(sigBusValid);
 
 
@@ -768,7 +767,7 @@ int sc_main(int argc, char* argv[])
             processingUnit->Port_CLK(clk);
             // try to patch Caches that are in PUs
             processingUnit->cache->Port_BusAddr(bus.Port_BusAddr);
-            processingUnit->cache->Port_BusWriter(bus.Port_BusWriter);
+            processingUnit->cache->Port_BusWriter(sigBusWriter);
             processingUnit->cache->Port_BusValid(sigBusValid);
             processingUnit->cache->Port_Bus(bus);
             // Push into vector
@@ -806,6 +805,7 @@ int sc_main(int argc, char* argv[])
         cout << endl;
         cout << "Avarage mem access time:" << (hitRate + missRate * 100) / (hitRate + missRate) << endl;
         cout << endl;
+        bus.output();
         //sc_close_vcd_trace_file(wf);
     }
 
