@@ -22,15 +22,6 @@ sc_mutex doneProcessesMtx;
 int numProcessesDone = 0;
 int gNumProcesses;
 
-// Functions
-
-// template<typename S>
-// string to_string(S var)
-// {
-//   ostringstream temp;
-//   temp << var;
-//   return temp.str();
-// };
 
 // Function type
 enum Function
@@ -64,14 +55,10 @@ class Bus : public Bus_if, public sc_module {
 public:
 
     /* Ports and Signals. */
-    sc_in<bool> Port_CLK;
-    //sc_signal<Function, SC_MANY_WRITERS> Port_BusValid;
-    sc_out<Function> Port_BusValid;
-
-    sc_signal_rv<32> Port_BusAddr;
-    sc_out<int> Port_BusWriter;
-
-
+    sc_in<bool>         Port_CLK;
+    sc_out<Function>    Port_BusValid;
+    sc_signal_rv<32>    Port_BusAddr;
+    sc_out<int>         Port_BusWriter;
 
     /* Bus mutex. */
     sc_mutex busMtx;
@@ -100,8 +87,10 @@ public:
         writes = 0;
     }
 
+
     /* Perform a read access to memory addr for CPU #writer. */
     virtual bool read(int writer, int addr){
+
         /* Try to get exclusive lock on bus. */
         logger<<endl<< "--> CORE "<< writer <<" try to Lock BUS for READ  -->"<<endl;
         while(busMtx.trylock() == -1){
@@ -109,18 +98,20 @@ public:
             waits++;
             wait();
         }
+
         /* Update number of bus accesses. */
         reads++;
         logger << "--> CORE "<< writer <<" LOCK for READ"<<endl;
+
         /* Set lines. */
         Port_BusAddr.write(addr);
         Port_BusWriter.write(writer);
         Port_BusValid.write(F_READ);
+
         /* Wait for everyone to recieve. */
-        wait(100);
+        wait(100);   //Simulate Memory Latency
 
         /* Reset. */
-       // Port_BusValid.write(F_INVALID);
         Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
         busMtx.unlock();
         logger << "--> CORE "<< writer << " UNLOCK for READ"<<endl;
@@ -129,6 +120,7 @@ public:
 
     /* Write action to memory, need to know the writer, address and data. */
     virtual bool write(int writer, int addr, int data){
+
         /* Try to get exclusive lock on the bus. */
         logger<<endl<< "--> CORE "<< writer <<" try to Lock BUS for WRITE  -->"<<endl;
         while(busMtx.trylock() == -1){
@@ -139,16 +131,16 @@ public:
         /* Update number of accesses. */
         writes++;
         logger << "--> CORE "<< writer <<"L OCK for WRITE"<<endl;
+
         /* Set. */
         Port_BusAddr.write(addr);
         Port_BusWriter.write(writer);
         Port_BusValid.write(F_WRITE);
 
         /* Wait for everyone to recieve. */
-        wait(100);
+        wait(100);  //Simulate Memory Latency
 
         /* Reset. */
-        //Port_BusValid.write(F_INVALID);
         Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
         busMtx.unlock();
         logger << "--> CORE "<< writer << " UNLOCK for WRITE"<<endl;
@@ -172,12 +164,7 @@ public:
 class Cache : public sc_module
 {
 public:
-    // Possible line states depending on the cache coherence protocol
-    enum Line_State
-    {
-        INVALID,
-        VALID,
-    };
+
 
     // Clock
     sc_in<bool>       Port_CLK;
@@ -203,6 +190,8 @@ public:
     sc_out<bool>       Port_ReadWrite;
     sc_out<bool>       Port_HitMiss;
 
+
+
     // has to be added when no standard constructor SC_CTOR is used
     SC_HAS_PROCESS(Cache);
 
@@ -211,7 +200,7 @@ public:
     public:
         int   tag;
         int   data;
-        bool  valid;
+        bool  valid;     // Possible line states depending on the cache coherence protocol
 
         Line() {
             tag = -1;
@@ -299,7 +288,11 @@ public:
 
 private:
     int pid_;
+
+    /* Set Variable is Private Member of Cache, so different Threads can access it*/
     Set set_[NUM_SETS];
+    /* We dont need mutex here at all, but to Communicate the Set between Bus and Execute thread, it is better to use a Mutex*/
+    sc_mutex SetMutex;
 
     int getIndex (int address) {
         return (address & 0x0000FE0) >> 5;
@@ -323,9 +316,9 @@ private:
             wait(Port_BusValid.value_changed_event());
             logger << "[Cache" << pid_ << "][bus] noticed an event" << endl;
 
+            /*When the same Core is snooping nothing have to do be done-> continue for next event */
             int BusCoreId = Port_BusWriter.read();
-
-            if(pid_ == BusCoreId)  //When the same Core is snooping nothing have to do be done
+            if(pid_ == BusCoreId)
                 continue;
 
             int addr   = Port_BusAddr.read().to_uint();
@@ -333,20 +326,20 @@ private:
             int tag    = getTag(addr);
             int linePosition = set_[index].findTag(tag);
 
-            /* Possibilities. */
+
+
+            /* If one Core, which is not in the Bus, Recieve this, looks for Possibilities*/
             switch(Port_BusValid.read())
             {
-                case F_READ:
-
+                case F_READ:    //For Valid-Invalid Protocol, every Possibility is the same
                 case F_WRITE:
                 case F_INVALID:
+                   while(SetMutex.trylock())
+                       wait();
                     set_[index].line[linePosition].valid = false;
+                    SetMutex.unlock();
                     logger <<"***************"<<endl<< "Bus Read/Write happen." << endl<<"This Core is "<<pid_<<" - index / line = "<<index<<" / "<<linePosition<<endl<<"  -Bus core is "<< Port_BusWriter.read()<<endl;
                     break;
-                    // your code of what to do while snooping the bus
-                    // keep in mind that a certain cache should distinguish between bus requests made by itself and requests made by other caches.
-                    // count and report the total number of read/write operations on the bus, in which the desired address (by other caches) is found in the snooping cache (probe read hits and probe write hits).
-
             }
         }
     }
@@ -391,11 +384,13 @@ private:
 
                 Port_ReadWrite.write(true);
             }
+            while(SetMutex.trylock())
+                wait();
 
             if (f == F_READ)
             {
                 if (linePosition > -1) {
-                    if(set_[index].line[linePosition].valid)
+                    if(set_[index].line[linePosition].valid)    //If the Data is Valid then hit, else it is invalid and a miss
                     {
                         set_[index].reorderHit(linePosition);
                         // leave the bus alone
@@ -437,7 +432,7 @@ private:
             else //writing
             {
                 if (linePosition > -1) {
-                    if(set_[index].line[linePosition].valid)
+                    if(set_[index].line[linePosition].valid)   //If the Data is Valid then hit, else it is invalid and a miss
                     {
                         set_[index].reorderHit(linePosition);
                         //cout << "WRITE HIT" << endl;
@@ -481,7 +476,7 @@ private:
                 cout<< "writing CPU WRITING DONE: "<<endl;
                 Port_CpuDone.write( RET_WRITE_DONE );
             }
-
+            SetMutex.unlock();
             for (int i=0 ; i<NUM_LINES ; i++) {
                 //cout << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
                 //logger << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
@@ -696,7 +691,8 @@ public:
         //dont_initialize();
     }
 
-private:
+//protected:  //Only for VCD TraceFile purpose-> public
+public:
     int pid_;
 
 
@@ -780,15 +776,6 @@ int sc_main(int argc, char* argv[])
 
         logger << "[main] " << "Processing unit patched with clock" << endl;
 
-        // Open VCD file
-        // sc_trace_file *wf = sc_create_vcd_trace_file("cache_results");
-        // sc_trace(wf, clk, "Clock");
-        // sc_trace(wf, sigIndex, "Index");
-        // sc_trace(wf, sigTag, "Tag");
-        // sc_trace(wf, sigNumOfEntries, "NumOfEntries");
-        // sc_trace(wf, sigReadWrite, "Read/Write");
-        // sc_trace(wf, sigHitMiss, "Hit/Miss");
-
         hitRate = 0;
         missRate = 0;
 
@@ -796,6 +783,26 @@ int sc_main(int argc, char* argv[])
 
 
         cout << "Running (press CTRL+C to interrupt)... " << endl;
+
+      /*
+       * Comment out VCD Tracefile*/
+       sc_trace_file *wf = sc_create_vcd_trace_file("cachehitmiss");
+        sc_trace(wf,clk, "Clock");
+        sc_trace(wf, bus.Port_BusAddr, "Bus/Address");
+        sc_trace(wf, sigBusWriter, "Core/in/Bus");
+        sc_trace(wf, sigBusValid, "Bus/Validr");
+        for( int i = 0; i < num_procs; i++ ) {
+            char name[12];
+            std::sprintf(name, "Index_cpu_%d", i);
+            sc_trace(wf, processingUnits[i]->sigIndex, name);
+            char name1[12];
+            std::sprintf(name1, "Hit_cpu_%d", i);
+            sc_trace(wf, processingUnits[i]->sigHitMiss, name1);
+            char name2[12];
+            std::sprintf(name2, "Read_cpu_%d", i);
+            sc_trace(wf, processingUnits[i]->sigReadWrite, name2);
+
+        }
 
         // Start Simulation
         sc_start();
@@ -805,7 +812,11 @@ int sc_main(int argc, char* argv[])
         cout << endl;
         cout << "Avarage mem access time:" << (hitRate + missRate * 100) / (hitRate + missRate) << endl;
         cout << endl;
+
+        // OutPut information about the Bus
         bus.output();
+
+
         //sc_close_vcd_trace_file(wf);
     }
 
