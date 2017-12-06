@@ -46,7 +46,7 @@ std::ofstream logger("logger.log", std::ios_base::out | std::ios_base::trunc);
 class Bus_if : public virtual sc_interface
 {
 public:
-    virtual bool read(int writer, int addr) = 0;
+    virtual bool read(int writer, int addr, bool Exclusive) = 0;
     virtual bool write(int writer, int addr, int data) = 0;
 };
 
@@ -89,7 +89,7 @@ public:
 
 
     /* Perform a read access to memory addr for CPU #writer. */
-    virtual bool read(int writer, int addr){
+    virtual bool read(int writer, int addr, bool Exclusive){
 
         /* Try to get exclusive lock on bus. */
         logger<<endl<< "--> CORE "<< writer <<" try to Lock BUS for READ  -->"<<endl;
@@ -106,7 +106,10 @@ public:
         /* Set lines. */
         Port_BusAddr.write(addr);
         Port_BusWriter.write(writer);
-        Port_BusValid.write(F_READ);
+        if(Exclusive)
+            Port_BusValid.write(F_INVALID);
+        else
+            Port_BusValid.write(F_READ);
 
         /* Wait for everyone to recieve. */
         wait(100);   //Simulate Memory Latency
@@ -332,10 +335,11 @@ private:
             switch(Port_BusValid.read())
             {
                 case F_READ:    //For Valid-Invalid Protocol, every Possibility is the same
+                    break;
                 case F_WRITE:
                 case F_INVALID:
-                   while(SetMutex.trylock())
-                       wait();
+                    while(SetMutex.trylock())
+                        wait();
                     set_[index].line[linePosition].valid = false;
                     SetMutex.unlock();
                     logger <<"***************"<<endl<< "Bus Read/Write happen." << endl<<"This Core is "<<pid_<<" - index / line = "<<index<<" / "<<linePosition<<endl<<"  -Bus core is "<< Port_BusWriter.read()<<endl;
@@ -389,36 +393,21 @@ private:
 
             if (f == F_READ)
             {
-                if (linePosition > -1) {
-                    if(set_[index].line[linePosition].valid)    //If the Data is Valid then hit, else it is invalid and a miss
-                    {
-                        set_[index].reorderHit(linePosition);
-                        // leave the bus alone
-                        //cout << "READ HIT" << endl;
-                        //  logger << "READ HIT" << endl;
-                        stats_readhit(pid_);
-                        Port_HitMiss.write(true);
-                        hitRate++;
-                    }
-                    else{
-                       // wait(100); // simulate memory access penalty
-                        set_[index].reorderMiss(numOfEntries, tag, data);
-                        // take the data from the bus
-                        Port_Bus->read(pid_, addr);         //BusRdX
-                        //cout << "READ MISS" << endl;
-                        //  logger << "READ MISS" << endl;
-                        stats_readmiss(pid_);
-                        Port_HitMiss.write(false);
-                        missRate++;
-                        set_[index].line[linePosition].valid = true;
-                    }
-
+                if((linePosition > -1) && set_[index].line[linePosition].valid)    //If the Data is Valid then hit, else it is invalid and a miss
+                {
+                    set_[index].reorderHit(linePosition);
+                    // leave the bus alone
+                    //cout << "READ HIT" << endl;
+                    //  logger << "READ HIT" << endl;
+                    stats_readhit(pid_);
+                    Port_HitMiss.write(true);
+                    hitRate++;
                 }
-                else {
-                   // wait(100); // simulate memory access penalty
+                else{
+                    // wait(100); // simulate memory access penalty
                     set_[index].reorderMiss(numOfEntries, tag, data);
                     // take the data from the bus
-                    Port_Bus->read(pid_, addr);
+                    Port_Bus->read(pid_, addr, false);         //BusRdX
                     //cout << "READ MISS" << endl;
                     //  logger << "READ MISS" << endl;
                     stats_readmiss(pid_);
@@ -426,15 +415,17 @@ private:
                     missRate++;
                     set_[index].line[linePosition].valid = true;
                 }
+
                 Port_CpuDone.write( RET_READ_DONE );
 
             }
             else //writing
             {
-                if (linePosition > -1) {
+               if (linePosition > -1) {
                     if(set_[index].line[linePosition].valid)   //If the Data is Valid then hit, else it is invalid and a miss
                     {
                         set_[index].reorderHit(linePosition);
+                        Port_Bus->write(pid_, addr, data);
                         //cout << "WRITE HIT" << endl;
                         //logger << "WRITE HIT" << endl;
                         stats_writehit(pid_);
@@ -442,9 +433,17 @@ private:
                         hitRate++;
                     }
                     else{
-                        set_[index].reorderMiss(numOfEntries, tag, data);
+                        set_[index].reorderHit(linePosition);
+                        Port_Bus->read(pid_, addr, true);
+                        //cout << "WRITE HIT" << endl;
+                        //logger << "WRITE HIT" << endl;
+                        stats_writehit(pid_);
+                        Port_HitMiss.write(true);
+                        hitRate++;
+                        set_[index].line[linePosition].valid = true;
+                        /*set_[index].reorderMiss(numOfEntries, tag, data);
 
-                        Port_Bus->write(pid_, addr, data);
+                        Port_Bus->read(pid_, addr, true);
                         //cout << "WRITE MISS" << endl;
                         //logger << "WRITE MISS" << endl;
                         //Port_Bus.write(F_WRITE);
@@ -452,14 +451,14 @@ private:
                         stats_writemiss(pid_);
                         Port_HitMiss.write(false);
                         missRate++;
-                        set_[index].line[linePosition].valid = true;
+                        set_[index].line[linePosition].valid = true;*/
                     }
 
                 }
                 else {
-                   /* if (numOfEntries == NUM_LINES) {
-                        wait(100); // set is full => writeback
-                    }*/
+                    /* if (numOfEntries == NUM_LINES) {
+                         wait(100); // set is full => writeback
+                     }*/
                     set_[index].reorderMiss(numOfEntries, tag, data);
 
                     Port_Bus->write(pid_, addr, data);
@@ -784,9 +783,9 @@ int sc_main(int argc, char* argv[])
 
         cout << "Running (press CTRL+C to interrupt)... " << endl;
 
-      /*
-       * Comment out VCD Tracefile*/
-       sc_trace_file *wf = sc_create_vcd_trace_file("cachehitmiss");
+        /*
+         * Comment out VCD Tracefile*/
+        sc_trace_file *wf = sc_create_vcd_trace_file("cachehitmiss");
         sc_trace(wf,clk, "Clock");
         sc_trace(wf, bus.Port_BusAddr, "Bus/Address");
         sc_trace(wf, sigBusWriter, "Core/in/Bus");
