@@ -289,13 +289,11 @@ public:
         }
     }
 
+    /* Set Variable is Private Member of Cache, so different Threads can access it*/
+    Set set_[NUM_SETS];
 private:
     int pid_;
 
-    /* Set Variable is Private Member of Cache, so different Threads can access it*/
-    Set set_[NUM_SETS];
-    /* We dont need mutex here at all, but to Communicate the Set between Bus and Execute thread, it is better to use a Mutex*/
-    sc_mutex SetMutex;
 
     int getIndex (int address) {
         return (address & 0x0000FE0) >> 5;
@@ -329,7 +327,7 @@ private:
             int tag    = getTag(addr);
             int linePosition = set_[index].findTag(tag);
 
-
+           // cout << "BUS Valid is :"<< set_[index].line[linePosition].valid <<" -Thread "<< pid_<< endl;
 
             /* If one Core, which is not in the Bus, Recieve this, looks for Possibilities*/
             switch(Port_BusValid.read())
@@ -338,10 +336,8 @@ private:
                     break;
                 case F_WRITE:
                 case F_INVALID:
-                    while(SetMutex.trylock())
-                        wait();
+
                     set_[index].line[linePosition].valid = false;
-                    SetMutex.unlock();
                     logger <<"***************"<<endl<< "Bus Read/Write happen." << endl<<"This Core is "<<pid_<<" - index / line = "<<index<<" / "<<linePosition<<endl<<"  -Bus core is "<< Port_BusWriter.read()<<endl;
                     break;
             }
@@ -388,33 +384,31 @@ private:
 
                 Port_ReadWrite.write(true);
             }
-            while(SetMutex.trylock())
-                wait();
+            cout << "CACHE Valid "<< set_[index].line[linePosition].valid << " -Core "<<pid_<< endl;
+            if (f == F_READ) {
 
-            if (f == F_READ)
-            {
-                if((linePosition > -1) && set_[index].line[linePosition].valid)    //If the Data is Valid then hit, else it is invalid and a miss
-                {
-                    set_[index].reorderHit(linePosition);
-                    // leave the bus alone
-                    //cout << "READ HIT" << endl;
-                    //  logger << "READ HIT" << endl;
-                    stats_readhit(pid_);
-                    Port_HitMiss.write(true);
-                    hitRate++;
-                }
-                else{
-                    // wait(100); // simulate memory access penalty
-                    set_[index].reorderMiss(numOfEntries, tag, data);
-                    // take the data from the bus
-                    Port_Bus->read(pid_, addr, false);         //BusRdX
-                    //cout << "READ MISS" << endl;
-                    //  logger << "READ MISS" << endl;
-                    stats_readmiss(pid_);
-                    Port_HitMiss.write(false);
-                    missRate++;
-                    set_[index].line[linePosition].valid = true;
-                }
+                    if ((linePosition > -1) &&set_[index].line[linePosition].valid)    //If the Data is Valid then hit, else it is invalid and a miss
+                    {
+                        set_[index].reorderHit(linePosition);
+                        // leave the bus alone
+                        //cout << "READ HIT" << endl;
+                        //  logger << "READ HIT" << endl;
+                        stats_readhit(pid_);
+                        Port_HitMiss.write(true);
+                        hitRate++;
+                    } else {
+                        // wait(100); // simulate memory access penalty
+                        set_[index].reorderMiss(numOfEntries, tag, data);
+                        // take the data from the bus
+                        Port_Bus->read(pid_, addr, false);         //BusRdX
+                        //cout << "READ MISS" << endl;
+                        //  logger << "READ MISS" << endl;
+                        stats_readmiss(pid_);
+                        Port_HitMiss.write(false);
+                        missRate++;
+                        set_[index].line[linePosition].valid = true;
+                    }
+
 
                 Port_CpuDone.write( RET_READ_DONE );
 
@@ -433,15 +427,8 @@ private:
                         hitRate++;
                     }
                     else{
-                        set_[index].reorderHit(linePosition);
-                        Port_Bus->read(pid_, addr, true);
-                        //cout << "WRITE HIT" << endl;
-                        //logger << "WRITE HIT" << endl;
-                        stats_writehit(pid_);
-                        Port_HitMiss.write(true);
-                        hitRate++;
-                        set_[index].line[linePosition].valid = true;
-                        /*set_[index].reorderMiss(numOfEntries, tag, data);
+
+                        set_[index].reorderMiss(numOfEntries, tag, data);
 
                         Port_Bus->read(pid_, addr, true);
                         //cout << "WRITE MISS" << endl;
@@ -451,7 +438,7 @@ private:
                         stats_writemiss(pid_);
                         Port_HitMiss.write(false);
                         missRate++;
-                        set_[index].line[linePosition].valid = true;*/
+                        set_[index].line[linePosition].valid = true;
                     }
 
                 }
@@ -472,13 +459,8 @@ private:
                     set_[index].line[linePosition].valid = true;
                 }
                 wait();
-                cout<< "writing CPU WRITING DONE: "<<endl;
+                //cout<< "writing CPU WRITING DONE: "<<endl;
                 Port_CpuDone.write( RET_WRITE_DONE );
-            }
-            SetMutex.unlock();
-            for (int i=0 ; i<NUM_LINES ; i++) {
-                //cout << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
-                //logger << "Line : " << i << "   Tag: " << set[index].line[i].tag << endl;
             }
 
         }
@@ -575,7 +557,7 @@ private:
 
                 if (f == F_WRITE)
                 {
-                    cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends write" << endl;
+                    //cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends write" << endl;
 
                     uint32_t data = rand();
                     Port_CacheData.write(data);
@@ -584,21 +566,21 @@ private:
                 }
                 else
                 {
-                    cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends read" << endl;
+                    //cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends read" << endl;
                 }
 
-                cout << "waiting" << endl;
+               // cout << "waiting" << endl;
                 wait(Port_CacheDone.value_changed_event());
-                cout << "value changed" << endl;
+              //  cout << "value changed" << endl;
 
                 if (f == F_READ)
                 {
-                    cout << sc_time_stamp() << ": [CPU" << pid_ << "] reads: " << Port_CacheData.read() << endl;
+                    //cout << sc_time_stamp() << ": [CPU" << pid_ << "] reads: " << Port_CacheData.read() << endl;
                 }
             }
             else
             {
-                cout << sc_time_stamp() << ": [CPU" << pid_ << "] executes NOP" << endl;
+              //  cout << sc_time_stamp() << ": [CPU" << pid_ << "] executes NOP" << endl;
             }
 
             // chceck if end of file
@@ -606,7 +588,7 @@ private:
 
             // Advance one cycle in simulated time
             wait();
-            cout << endl;
+            //cout << endl;
         }
 
         if( !isDone_ )
@@ -620,7 +602,7 @@ private:
         {
             sc_stop();
             logger << "Simulation stopped" << endl;
-            cout << "Total runtime: " << sc_time_stamp() << endl;
+            //cout << "Total runtime: " << sc_time_stamp() << endl;
         }
 
     }
