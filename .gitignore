@@ -3,3 +3,5 @@
 *.sh
 *.log
 Makefile
+*.DS_Store
+*txt
