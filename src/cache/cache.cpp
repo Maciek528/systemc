@@ -47,10 +47,25 @@ enum Function
     F_WRITE,
 };
 
+enum Snooping
+{
+    Snoop_Hit,
+    Snoop_Miss
+};
+
 enum RetCode
 {
     RET_READ_DONE,
     RET_WRITE_DONE
+};
+
+enum State
+{
+    S_Modified  = 0,
+    S_Owner     = 1,
+    S_Exclusive = 2,
+    S_Shared    = 3,
+    S_Invalid   = 4
 };
 
 double hitRate, missRate;
@@ -58,12 +73,166 @@ double hitRate, missRate;
 // Initialize logger object
 std::ofstream logger("logger.log", std::ios_base::out | std::ios_base::trunc);
 
+//Class for holding information about the L1 D Cache
+class Cache_L1{
+public:
+    typedef struct {
+        int Set_Number;  // index number
+        int Tag[n_Set_Association];
+        int Data[n_Set_Association];
+        /* The state variable stores the information for MOESI protocol
+         * 0 - Modified
+         * 1 - Owner
+         * 2 - Exclusive
+         * 3 - Shared
+         * 4 - Invalid*/
+        State state[n_Set_Association];
+        double TimeStamp[n_Set_Association];
+    } Cache_Set;
+
+
+    Cache_Set Set[Set_Count];
+
+    Cache_L1()
+    {
+        for(int nCOunt = 0; nCOunt < Set_Count; nCOunt++)
+        {
+            Set[nCOunt].Set_Number = nCOunt;
+            for(int nIndex = 0; nIndex < n_Set_Association; nIndex++)
+            {
+
+                Set[nCOunt].Tag[nIndex]         = -1;
+                Set[nCOunt].Data[nIndex]        = -1;
+                Set[nCOunt].state[nIndex]       =  S_Invalid ; //At the begining every state is invalid
+            }
+        }
+    };
+
+    //This Function Check a given Set if there is the Tag for Cache Hit or Miss
+    // Parameter:  *ChangedLine: Return Value of the Line Number which can be overwritten
+    //             SetNumber : This Value should give the index number where the tag should be searched
+    //             Tag: Adress Tag
+    // Return:     true - there is a cache hit
+    //             false - there is a cache miss
+    bool CheckforMissorHit(short *ChangedLine,short SetNumber, int Tag, bool *BusRdX)
+    {
+        double ShortestTime = sc_time_stamp().to_double();
+        for(short LineNumber = 0; LineNumber < n_Set_Association; LineNumber++)
+        {
+            if(Set[SetNumber].Tag[LineNumber] == Tag)
+            {
+                *ChangedLine = LineNumber;
+                if(Set[SetNumber].state[LineNumber] == S_Invalid) {
+                    *BusRdX = true;
+                    return false;
+                } else
+                {
+                    return true;
+                }
+
+            }
+
+            if(Set[SetNumber].TimeStamp[LineNumber] < ShortestTime)
+            {
+                *ChangedLine = LineNumber;
+                ShortestTime = Set[SetNumber].TimeStamp[LineNumber];
+            }
+
+        }
+        *BusRdX = false;
+        // Cache miss- no empty Line
+        return false;
+    };
+
+    //This Function overwrite a Cache Line with the give Parameter
+    void WriteLine( short SetNumber, short LineNumber, int Tag, int Data,State sta )
+    {
+        Set[SetNumber].Tag[LineNumber]      = Tag;
+        Set[SetNumber].Data[LineNumber]     = Data;
+        Set[SetNumber].state[LineNumber]    = sta;
+        Set[SetNumber].TimeStamp[LineNumber] = sc_time_stamp().to_double();
+
+    };
+
+    void SetState(short SetNumber, int Tag, State sta )
+    {
+        int LineNumber = -1;
+        for(short LineIndex = 0; LineIndex < n_Set_Association; LineIndex++)
+        {
+            if(Set[SetNumber].Tag[LineIndex] == Tag)
+                LineNumber = LineIndex;
+        }
+
+        if(LineNumber == -1) {
+            //   cout << "LINENUMBER is -1!!!"<<endl;
+            return;
+        }
+        cout << "LINENUMBER is "<< LineNumber<<" !!!"<<endl;
+        Set[SetNumber].state[LineNumber] = sta;
+    };
+
+    State GetState(short SetNumber, int tag)
+    {
+        int LineNumber = -1;
+        for(short LineIndex = 0; LineIndex < n_Set_Association; LineIndex++)
+        {
+            if(Set[SetNumber].Tag[LineIndex] == tag)
+                LineNumber = LineIndex;
+        }
+        if(LineNumber == -1) {
+            //   cout << "LINENUMBER is -1!!!"<<endl;
+            return S_Invalid;
+        }
+        return Set[SetNumber].state[LineNumber];
+    }
+
+
+
+};
+
+/*class Cache_L2
+{
+public:
+    Cache_L1 *CoreCache;
+
+    Cache_L2 (uint NumberofCore = 1)
+    {
+        CoreCache = new Cache_L1[NumberofCore];
+        TotalCores = NumberofCore;
+    }
+
+    bool GetValidLine(short pid_, int SetIndex, int tag)
+    {
+        for(short CoreIndex = 0; CoreIndex < TotalCores; CoreIndex++)
+        {
+            if(pid_ == CoreIndex)
+                continue;
+            for(short LineIndex = 0; LineIndex < n_Set_Association; LineIndex++)
+            {
+                if(CoreCache[CoreIndex].Set[SetIndex].Tag[LineIndex] == tag)
+                    if(CoreCache[CoreIndex].Set[SetIndex].state[LineIndex] != S_Invalid)
+                        return true;
+            }
+        }
+        return false;
+    }
+
+protected:
+    uint TotalCores;
+};
+
+Cache_L2 *Shared_Memory;*/
+
+
 // Simple Bus interface
 class Bus_if : public virtual sc_interface
 {
 public:
-    virtual bool read(int writer, int addr, bool Exclusive) = 0;
-    virtual bool write(int writer, int addr, int data) = 0;
+    virtual bool BusRd(int writer, int addr) = 0;
+    virtual bool BusRdX(int writer, int addr) = 0;
+    virtual bool BusUpgr(int writer, int addr, int data) = 0;
+    virtual bool Flush() = 0;
+   // virtual bool write(int writer, int addr, int data) = 0;
 };
 
 /* Bus class, provides a way to share one memory in multiple CPU + Caches. */
@@ -73,6 +242,7 @@ public:
     /* Ports and Signals. */
     sc_in<bool>         Port_CLK;
     sc_out<Function>    Port_BusValid;
+    sc_in<Snooping>     Port_BusSnoop;
     sc_signal_rv<32>    Port_BusAddr;
     sc_out<int>         Port_BusWriter;
 
@@ -83,6 +253,7 @@ public:
     long waits;
     long reads;
     long writes;
+    short NumberofCores;
 
     // has to be added when no standard constructor SC_CTOR is used
     SC_HAS_PROCESS(Bus);
@@ -104,8 +275,8 @@ public:
     }
 
 
-    /* Perform a read access to memory addr for CPU #writer. */
-    virtual bool read(int writer, int addr, bool Exclusive){
+    /* Perform a Bus Read access to memory addr for CPU #writer. */
+    virtual bool BusRd(int writer, int addr){
 
         /* Try to get exclusive lock on bus. */
         logger<<endl<< "--> CORE "<< writer <<" try to Lock BUS for READ  -->"<<endl;
@@ -122,13 +293,52 @@ public:
         /* Set lines. */
         Port_BusAddr.write(addr);
         Port_BusWriter.write(writer);
-        if(Exclusive)
-            Port_BusValid.write(F_READEx);
-        else
-            Port_BusValid.write(F_READ);
+        Port_BusValid.write(F_READ);
 
         /* Wait for everyone to recieve. */
-        wait(100);   //Simulate Memory Latency
+        for(short nmrEvent = 0; nmrEvent < (NumberofCores-1); nmrEvent++)
+        {
+            cout << "Waiting for Snoop event "<< nmrEvent<<endl;
+            wait(Port_BusSnoop.value_changed_event());
+            Snooping sno = Port_BusSnoop.read();
+            cout << sno<<" Event!"<<endl;
+        }
+
+        /* Reset. */
+        Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
+        busMtx.unlock();
+        logger << "--> CORE "<< writer << " UNLOCK for READ"<<endl;
+        return(true);
+    };
+
+    /* Perform a Bus Read Exclusive access to memory addr for CPU #writer. */
+    virtual bool BusRdX(int writer, int addr){
+
+        /* Try to get exclusive lock on bus. */
+        logger<<endl<< "--> CORE "<< writer <<" try to Lock BUS for READ  -->"<<endl;
+        while(busMtx.trylock() == -1){
+            /* Wait when bus is in contention. */
+            waits++;
+            wait();
+        }
+
+        /* Update number of bus accesses. */
+        reads++;
+        logger << "--> CORE "<< writer <<" LOCK for READ"<<endl;
+
+        /* Set lines. */
+        Port_BusAddr.write(addr);
+        Port_BusWriter.write(writer);
+        Port_BusValid.write(F_READEx);
+
+        /* Wait for everyone to recieve. */
+        for(short nmrEvent = 0; nmrEvent < (NumberofCores-1); nmrEvent++)
+        {
+            cout << "Waiting for Snoop event "<< nmrEvent<<endl;
+            wait(Port_BusSnoop.value_changed_event());
+            Snooping sno = Port_BusSnoop.read();
+            cout << sno<<" Event!"<<endl;
+        }
 
         /* Reset. */
         Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
@@ -138,7 +348,7 @@ public:
     };
 
     /* Write action to memory, need to know the writer, address and data. */
-    virtual bool write(int writer, int addr, int data){
+    virtual bool BusUpgr(int writer, int addr, int data){
 
         /* Try to get exclusive lock on the bus. */
         logger<<endl<< "--> CORE "<< writer <<" try to Lock BUS for WRITE  -->"<<endl;
@@ -157,13 +367,25 @@ public:
         Port_BusValid.write(F_WRITE);
 
         /* Wait for everyone to recieve. */
-        wait(100);  //Simulate Memory Latency
+        for(short nmrEvent = 0; nmrEvent < (NumberofCores-1); nmrEvent++)
+        {
+            cout << "Waiting for Snoop event "<< nmrEvent<<endl;
+            wait(Port_BusSnoop.value_changed_event());
+            Snooping sno = Port_BusSnoop.read();
+            cout << sno<<" Event!"<<endl;
+        }
 
         /* Reset. */
         Port_BusAddr.write("ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ");
         busMtx.unlock();
         logger << "--> CORE "<< writer << " UNLOCK for WRITE"<<endl;
         return(true);
+    }
+
+    bool Flush()
+    {
+        wait(100);
+        return false;
     }
 
     /* Bus output. */
@@ -196,8 +418,9 @@ public:
 
     // Bus snooping ports
     sc_in_rv<32>        Port_BusAddr;
-    sc_in<int>       Port_BusWriter;
+    sc_in<int>          Port_BusWriter;
     sc_in<Function>     Port_BusValid;
+    sc_out<Snooping>    Port_Snoop;
 
     // Bus requests ports
     sc_port<Bus_if, 0>     Port_Bus;
@@ -213,100 +436,6 @@ public:
     // has to be added when no standard constructor SC_CTOR is used
     SC_HAS_PROCESS(Cache);
 
-    typedef struct {
-        int Set_Number;  // index number
-        int Tag[n_Set_Association];
-        int Data[n_Set_Association];
-        bool valid[n_Set_Association];
-        double TimeStamp[n_Set_Association];
-    } Cache_Set;
-
-
-    class Cache_Sets{
-    public:
-        Cache_Set Set[Set_Count];
-
-        Cache_Sets()
-        {
-            for(int nCOunt = 0; nCOunt < Set_Count; nCOunt++)
-            {
-                Set[nCOunt].Set_Number = nCOunt;
-                for(int nIndex = 0; nIndex < n_Set_Association; nIndex++)
-                {
-
-                    Set[nCOunt].Tag[nIndex]        = -1;
-                    Set[nCOunt].Data[nIndex]       = -1;
-                    Set[nCOunt].valid[nIndex]    = false;
-                }
-            }
-        };
-
-        //This Function Check a given Set if there is the Tag for Cache Hit or Miss
-        // Parameter:  *ChangedLine: Return Value of the Line Number which can be overwritten
-        //             SetNumber : This Value should give the index number where the tag should be searched
-        //             Tag: Adress Tag
-        // Return:     true - there is a cache hit
-        //             false - there is a cache miss
-        bool CheckforMissorHit(short *ChangedLine,short SetNumber, int Tag, bool isFromWrite, bool *BusRdX)
-        {
-            double ShortestTime = sc_time_stamp().to_double();
-            for(short LineNumber = 0; LineNumber < n_Set_Association; LineNumber++)
-            {
-                if(Set[SetNumber].Tag[LineNumber] == Tag)
-                {
-                    //Cache hit- Tag is already in Cache and is synechronized with Memory
-                    *ChangedLine = LineNumber;
-                   if(Set[SetNumber].valid[LineNumber]) {
-                       return true;
-                   } else
-                   {
-                       *BusRdX = true;
-                       return false;
-                   }
-
-                }
-
-                if(Set[SetNumber].TimeStamp[LineNumber] < ShortestTime)
-                {
-                    *ChangedLine = LineNumber;
-                    ShortestTime = Set[SetNumber].TimeStamp[LineNumber];
-                }
-
-            }
-            *BusRdX = false;
-            // Cache miss- no empty Line
-            return false;
-        };
-
-        //This Function overwrite a Cache Line with the give Parameter
-        void WriteLine( short SetNumber, short LineNumber, int Tag, int Data,bool valid )
-        {
-            Set[SetNumber].Tag[LineNumber]     = Tag;
-            Set[SetNumber].Data[LineNumber]    = Data;
-            Set[SetNumber].valid[LineNumber] = valid;
-            Set[SetNumber].TimeStamp[LineNumber] = sc_time_stamp().to_double();
-
-        };
-
-        void SetInvalid(short SetNumber, short LineNumber)
-        {
-            Set[SetNumber].valid[LineNumber] = false;
-        };
-
-        int LinePosition (int SetNumber,int Tag)
-        {
-            for(short LineNumber = 0; LineNumber < n_Set_Association; LineNumber++)
-            {
-                if(Set[SetNumber].Tag[LineNumber] == Tag)
-                    return LineNumber;
-            }
-            return -1;
-        };
-
-
-    };
-
-
 
 
 
@@ -316,6 +445,7 @@ public:
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
 
+
     }
 
 
@@ -323,7 +453,7 @@ private:
     /* Core Number*/
     int pid_;
     /* Set Variable is Private Member of Cache, so different Threads can access it*/
-    Cache_Sets set_;
+    Cache_L1 set_;
 
     int getIndex (int address) {
         return (address & 0x0000FE0) >> 5;
@@ -345,7 +475,7 @@ private:
         {
             /* Wait for work. */
             wait(Port_BusValid.value_changed_event());
-            logger << "[Cache" << pid_ << "][bus] noticed an event" << endl;
+            cout << "[Cache" << pid_ << "][bus] noticed an event" << endl;
 
             /*When the same Core is snooping nothing have to do be done-> continue for next event */
             int BusCoreId = Port_BusWriter.read();
@@ -355,30 +485,49 @@ private:
             int addr   = Port_BusAddr.read().to_uint();
             int index  = getIndex(addr);
             int tag    = getTag(addr);
-            int linePosition = set_.LinePosition(index, tag);
+            State ActualState = set_.GetState(index,tag);
 
-            // cout << "BUS Valid is :"<< set_[index].line[linePosition].valid <<" -Thread "<< pid_<< endl;
+            if( ActualState == S_Invalid)
+            {
+                Port_Snoop->write(Snoop_Miss);
+                cout<<"writting to bus Snoop_Miss"<<endl;
+                continue;
+            }
+
 
             /* If one Core, which is not in the Bus, Recieve this, looks for Possibilities*/
             switch(Port_BusValid.read())
             {
-                case F_INVALID:
-                case F_READ:    //For Valid-Invalid Protocol, every Possibility is the same
+                case F_READ:   //BusRd
+                    if(ActualState == S_Modified ||
+                       ActualState == S_Exclusive ||
+                       ActualState == S_Owner)
+                    {
+                        Port_Bus->Flush();
+                        set_.SetState(index, tag, S_Owner);
+                    }
                     break;
-                case F_WRITE:
-                case F_READEx:
-
-                    set_.SetInvalid(index, linePosition);
-                   // logger <<"***************"<<endl<< "Bus Read/Write happen." << endl<<"This Core is "<<pid_<<" - index / line = "<<index<<" / "<<linePosition<<endl<<"  -Bus core is "<< Port_BusWriter.read()<<endl;
+                case F_READEx:  //BusRdX
+                    if(ActualState != S_Shared)
+                        Port_Bus->Flush();
+                    set_.SetState(index, tag, S_Invalid);
+                    break;
+                case F_WRITE:   //BusUpgr
+                    if(ActualState == S_Owner ||
+                            ActualState == S_Shared)
+                        set_.SetState(index, tag , S_Invalid);
+                    break;
+                default:
                     break;
             }
+            Port_Snoop->write(Snoop_Hit);
+            cout<<"writting to bus Snoop_Hit"<<endl;
+
         }
     }
 
     void execute()
     {
-
-
         while (true)
         {
             wait(Port_CpuFunc.value_changed_event());	// this is fine since we use sc_buffer
@@ -415,21 +564,28 @@ private:
            // cout << "CACHE Valid "<< set_[index].line[linePosition].valid << " -Core "<<pid_<< endl;
             if (f == F_READ) {
                 bool BusRdX = false;
-                bool b_CacheHit = set_.CheckforMissorHit(&ChangedLine, index, tag, false, &BusRdX);
+                bool b_CacheHit = set_.CheckforMissorHit(&ChangedLine, index, tag, &BusRdX);
 
                 if(b_CacheHit)
                 {
                     stats_readhit(pid_);
                     Port_HitMiss.write(true);
                     hitRate++;
+
                 }
                 else
                 {
                     stats_readmiss(pid_);
                     Port_HitMiss.write(false);
                     missRate++;
-                    Port_Bus->read(pid_,addr,false);
-                    set_.WriteLine(index, ChangedLine, tag, data, true);
+                    Port_Bus->BusRd(pid_,addr);
+                    //if(Shared_Memory->GetValidLine(pid_,index,tag))
+                      //  set_.WriteLine(index, ChangedLine, tag, data, S_Shared);
+                    //else
+                    {
+                        set_.WriteLine(index, ChangedLine, tag, data, S_Exclusive);
+                        wait(100);
+                    }
                 }
 
                 Port_CpuDone.write( RET_READ_DONE );
@@ -438,15 +594,24 @@ private:
             else //writing
             {
                 bool BusRdX = false;
-                bool b_CacheHit = set_.CheckforMissorHit(&ChangedLine, index, tag, true, &BusRdX);
+                bool b_CacheHit = set_.CheckforMissorHit(&ChangedLine, index, tag, &BusRdX);
 
                 if (b_CacheHit)
                 {
                     stats_writehit(pid_);
                     Port_HitMiss.write(true);
                     hitRate++;
-                    Port_Bus->write(pid_,addr,data);
-                    set_.WriteLine(index, ChangedLine, tag,data,true);
+
+                    switch (set_.Set[index].state[ChangedLine])
+                    {
+                        case S_Owner:
+                        case S_Shared:
+                            Port_Bus->BusUpgr(pid_,addr,data);
+                        default:
+                            break;
+                    }
+                    set_.WriteLine(index, ChangedLine, tag,data,S_Modified);
+
                 }
                 else
                 {
@@ -454,12 +619,8 @@ private:
                     stats_writemiss(pid_);
                     Port_HitMiss.write(false);
                     missRate++;
-                    set_.WriteLine(index, ChangedLine, tag,data,true);
-
-                    if(BusRdX)
-                        Port_Bus->read(pid_,addr,true);
-                    else
-                        Port_Bus->write(pid_,addr,data);
+                    set_.WriteLine(index, ChangedLine, tag,data,S_Modified);
+                    Port_Bus->BusRdX(pid_,addr);
                 }
                 wait();
                 //cout<< "writing CPU WRITING DONE: "<<endl;
@@ -560,7 +721,7 @@ private:
 
                 if (f == F_WRITE)
                 {
-                    cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends write" << endl;
+                    //cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends write" << endl;
 
                     uint32_t data = rand();
                     Port_CacheData.write(data);
@@ -569,7 +730,7 @@ private:
                 }
                 else
                 {
-                    cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends read" << endl;
+                    //cout << sc_time_stamp() << ": [CPU" << pid_ << "] sends read" << endl;
                 }
 
                 // cout << "waiting" << endl;
@@ -578,12 +739,12 @@ private:
 
                 if (f == F_READ)
                 {
-                    cout << sc_time_stamp() << ": [CPU" << pid_ << "] reads: " << Port_CacheData.read() << endl;
+                   // cout << sc_time_stamp() << ": [CPU" << pid_ << "] reads: " << Port_CacheData.read() << endl;
                 }
             }
             else
             {
-                  cout << sc_time_stamp() << ": [CPU" << pid_ << "] executes NOP" << endl;
+                  //cout << sc_time_stamp() << ": [CPU" << pid_ << "] executes NOP" << endl;
             }
 
             // chceck if end of file
@@ -725,6 +886,7 @@ int sc_main(int argc, char* argv[])
         // sc_signal<int>        sigBusWriter;
         sc_buffer<int, SC_MANY_WRITERS >   sigBusWriter;
         sc_buffer<Function, SC_MANY_WRITERS> sigBusValid;
+        sc_buffer<Snooping , SC_MANY_WRITERS> sigBusSnoop;
 
         // Create Bus
         Bus         bus("bus");
@@ -733,6 +895,7 @@ int sc_main(int argc, char* argv[])
         // General Port_BusBus Signals
         bus.Port_BusWriter(sigBusWriter);
         bus.Port_BusValid(sigBusValid);
+        bus.Port_BusSnoop(sigBusSnoop);
 
 
         // Create a vector of pointers to processing units
@@ -747,6 +910,7 @@ int sc_main(int argc, char* argv[])
             processingUnit->cache->Port_BusAddr(bus.Port_BusAddr);
             processingUnit->cache->Port_BusWriter(sigBusWriter);
             processingUnit->cache->Port_BusValid(sigBusValid);
+            processingUnit->cache->Port_Snoop(sigBusSnoop);
             processingUnit->cache->Port_Bus(bus);
             // Push into vector
             processingUnits.push_back(processingUnit);
