@@ -11,6 +11,8 @@
 
 using namespace std;
 
+void total_avg_print();
+
 sc_mutex traceFileMtx;
 sc_mutex doneProcessesMtx;
 
@@ -53,6 +55,22 @@ enum State
     S_Shared    = 3,
     S_Invalid   = 4,
     S_NotDefined= 5
+};
+
+struct stats
+{
+  int Reads;
+  int RHit;
+  int RMiss;
+  int Writes;
+  int WHit;
+  int WMiss;
+  double HitRate;
+};
+
+stats stats_total =
+{
+  0,  0,  0,  0,  0,  0,  0.0
 };
 
 double  hitRate,
@@ -527,6 +545,7 @@ private:
                 if(b_CacheHit)
                 {
                     stats_readhit(pid_);
+                    stats_total.RHit++;
                     Port_HitMiss.write(true);
                     hitRate++;
 
@@ -534,6 +553,7 @@ private:
                 else
                 {
                     stats_readmiss(pid_);
+                    stats_total.RMiss++;
                     Port_HitMiss.write(false);
                     missRate++;
                     if(Port_Bus->BusRd(pid_,addr))
@@ -554,6 +574,7 @@ private:
                 if (b_CacheHit)
                 {
                     stats_writehit(pid_);
+                    stats_total.WHit++;
                     Port_HitMiss.write(true);
                     hitRate++;
 
@@ -572,6 +593,7 @@ private:
                 {
 
                     stats_writemiss(pid_);
+                    stats_total.WMiss++;
                     Port_HitMiss.write(false);
                     missRate++;
                     set_.WriteLine(index, ChangedLine, tag,data,S_Modified);
@@ -915,6 +937,7 @@ int sc_main(int argc, char* argv[])
 
         // Print statistics after simulation finished
         stats_print();
+        total_avg_print();
         cout << endl;
         cout<< "Number of SnoopHits: "<< nSnoopHit<< "  and Number of SnoopMiss: "<< nSnoopMiss<<endl;
         cout << "Avarage mem access time:" << (hitRate + nSnoopHit + (missRate - nSnoopHit) * 100) / (hitRate + missRate) << endl;
@@ -934,4 +957,34 @@ int sc_main(int argc, char* argv[])
 
     logger.close();
     return 0;
+}
+
+
+
+void total_avg_print()
+{
+  printf("\n");
+
+  stats_total.Reads   = stats_total.RHit + stats_total.RMiss;
+  stats_total.Writes  = stats_total.WHit + stats_total.WMiss;
+  stats_total.HitRate =  ((double) stats_total.RHit + (double) stats_total.WHit) / (double) (stats_total.Reads + stats_total.Writes);
+
+  printf("%s\t%d\t%d\t%d\t%d\t%d\t%d\t%f\n", "TOT: ",
+    stats_total.Reads,
+    stats_total.RHit,
+    stats_total.RMiss,
+    stats_total.Writes,
+    stats_total.WHit,
+    stats_total.WMiss,
+    stats_total.HitRate);
+
+  printf("%s\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%f\n", "AVG: ",
+    (double) stats_total.Reads    / (double) num_cpus,
+    (double) stats_total.RHit     / (double) num_cpus,
+    (double) stats_total.RMiss    / (double) num_cpus,
+    (double) stats_total.Writes   / (double) num_cpus,
+    (double) stats_total.WHit     / (double) num_cpus,
+    (double) stats_total.WMiss    / (double) num_cpus,
+    (double) stats_total.HitRate  / (double) num_cpus);
+
 }
