@@ -9,13 +9,7 @@
 
 //#define SC_DEFAULT_WRITER_POLICY SC_MANY_WRITERS
 
-
-
 using namespace std;
-
-static const int NUM_SETS = 128;
-static const int NUM_LINES = 8;
-static const int MRU_POSITION = 0;
 
 sc_mutex traceFileMtx;
 sc_mutex doneProcessesMtx;
@@ -23,21 +17,11 @@ sc_mutex doneProcessesMtx;
 int numProcessesDone = 0;
 int gNumProcesses;
 
-
-static const int MEM_SIZE = 512;
-
 static const int Cache_Size = 32768;    // Total L1 Cache Size is 32 KByte (only for data)
 static const int Cache_Line = 32;       // Size of one cache Line is 32 byte
 static const int Cache_Line_Count = Cache_Size / Cache_Line ; // number of total lines is 1024
 static const int n_Set_Association = 8;  // The cache is 8 way set associative
 static const int Set_Count = Cache_Line_Count / n_Set_Association ; // Number of sets in this cache is 128
-
-static const int M_Memory_Size = Cache_Size * 16; // This variable is not defined. It is the total size of the main memory
-static const int M_Memory_Block_Count = Set_Count; // Block number is always the same as the set number
-static const int M_Memory_Block_Size = M_Memory_Size / M_Memory_Block_Count; //The size of one Block in the Memory
-static const int Line_Count_per_Block = M_Memory_Block_Size / Cache_Line ; // The number of Lines in each block
-
-
 
 
 // Function type
@@ -46,7 +30,7 @@ enum Function
     F_INVALID,
     F_READ,
     F_READEx,
-    F_WRITE,
+    F_WRITE
 };
 
 enum Snooping
@@ -206,10 +190,7 @@ public:
     virtual bool BusRd(int writer, int addr) = 0;
     virtual bool BusRdX(int writer, int addr) = 0;
     virtual bool BusUpgr(int writer, int addr, int data) = 0;
-  //  virtual bool Flush() = 0;
     virtual void SetCacheState(int writer, State nSt) = 0;
-    //virtual void WriteEvent() = 0;
-    // virtual bool write(int writer, int addr, int data) = 0;
 };
 
 /* Bus class, provides a way to share one memory in multiple CPU + Caches. */
@@ -219,10 +200,8 @@ public:
     /* Ports and Signals. */
     sc_in<bool>         Port_CLK;
     sc_out<Function>    Port_BusValid;
-   // sc_in<Snooping >     Port_BusSnoop;
     sc_signal_rv<32>    Port_BusAddr;
     sc_out<int>         Port_BusWriter;
-
 
     /* Bus mutex. */
     sc_mutex busMtx;
@@ -396,7 +375,6 @@ class Cache : public sc_module
 {
 public:
 
-
     // Clock
     sc_in<bool>       Port_CLK;
 
@@ -427,15 +405,11 @@ public:
     SC_HAS_PROCESS(Cache);
 
 
-
-
     // Custom constructor
     Cache(sc_module_name nm, int pid): sc_module(nm), pid_(pid) {
         SC_THREAD(bus);
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
-
-
     }
 
 
@@ -460,8 +434,6 @@ private:
     {
         logger << "[Cache" << pid_ << "][bus] start" << endl;
 
-        //int f = 0;
-
         /* Continue while snooping is activated. */
         while(true)
         {
@@ -483,9 +455,6 @@ private:
 
             if( ActualState == S_Invalid)
             {
-              // Port_Snoop->write(Snoop_Miss);
-
-                //Port_Bus->WriteEvent();
                 cout<<"writting to bus Snoop_Miss"<<endl;
                 continue;
             }
@@ -499,27 +468,16 @@ private:
                        ActualState == S_Exclusive ||
                        ActualState == S_Owner)
                     {
-                       // Port_Bus->Flush();
-                       // wait(100);
                         set_.SetState(index, tag, S_Owner);
                     }
                     break;
                 case F_READEx:  //BusRdX
-                    if(ActualState != S_Shared)
-                        //wait(100);
-                       // Port_Bus->Flush();
-                    set_.SetState(index, tag, S_Invalid);
-                    break;
                 case F_WRITE:   //BusUpgr
-                    if(ActualState == S_Owner ||
-                       ActualState == S_Shared)
                         set_.SetState(index, tag , S_Invalid);
                     break;
                 default:
                     break;
             }
-           // Port_Snoop->write(Snoop_Hit);
-         //   wait();
 
             cout<<"writting to bus Snoop_Hit"<<endl;
 
@@ -664,7 +622,7 @@ private:
     {
         //logger << "[CPU" << pid_ << "][execute] " << "start" << endl;
 
-        bool isDone_ = false;
+        isDone_ = false;
 
         TraceFile::Entry    tr_data;
         Function  f;
@@ -959,7 +917,7 @@ int sc_main(int argc, char* argv[])
         stats_print();
         cout << endl;
         cout<< "Number of SnoopHits: "<< nSnoopHit<< "  and Number of SnoopMiss: "<< nSnoopMiss<<endl;
-        cout << "Avarage mem access time:" << (hitRate + (missRate - nSnoopHit) * 100) / (hitRate + missRate) << endl;
+        cout << "Avarage mem access time:" << (hitRate + nSnoopHit + (missRate - nSnoopHit) * 100) / (hitRate + missRate) << endl;
         cout << endl;
 
         // OutPut information about the Bus
