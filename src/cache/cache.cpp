@@ -59,19 +59,19 @@ enum State
 
 struct stats
 {
-  int Reads;
-  int RHit;
-  int RMiss;
-  int Writes;
-  int WHit;
-  int WMiss;
-  double HitRate;
+    int Reads;
+    int RHit;
+    int RMiss;
+    int Writes;
+    int WHit;
+    int WMiss;
+    double HitRate;
 };
 
 stats stats_total =
-{
-  0,  0,  0,  0,  0,  0,  0.0
-};
+        {
+                0,  0,  0,  0,  0,  0,  0.0
+        };
 
 double  hitRate,
         missRate,
@@ -124,16 +124,16 @@ public:
     //             Tag: Adress Tag
     // Return:     true - there is a cache hit
     //             false - there is a cache miss
-    bool CheckforMissorHit(short *ChangedLine,short SetNumber, int Tag, bool *BusRdX)
+    bool CheckforMissorHit(short *ChangedLine,short SetNumber, int Tag, bool *HasMOState)
     {
         double ShortestTime = sc_time_stamp().to_double();
+        *HasMOState = false;
         for(short LineNumber = 0; LineNumber < n_Set_Association; LineNumber++)
         {
             if(Set[SetNumber].Tag[LineNumber] == Tag)
             {
                 *ChangedLine = LineNumber;
                 if(Set[SetNumber].state[LineNumber] == S_Invalid) {
-                    *BusRdX = true;
                     return false;
                 } else
                 {
@@ -146,10 +146,12 @@ public:
             {
                 *ChangedLine = LineNumber;
                 ShortestTime = Set[SetNumber].TimeStamp[LineNumber];
+                State osta = GetState(SetNumber, Tag);
+                if(osta == S_Modified || osta == S_Owner)
+                    *HasMOState = true;
             }
 
         }
-        *BusRdX = false;
         // Cache miss- no empty Line
         return false;
     };
@@ -226,9 +228,9 @@ public:
 
     /* Variables. */
     long waits;
-    long nBusRd;
-    long nBusRdX;
-    long nBusUpgr;
+    long *nBusRd;
+    long *nBusRdX;
+    long *nBusUpgr;
     short NumberofCores;
 
     State *CacheState;
@@ -248,15 +250,18 @@ public:
 
         /* Update variables. */
         waits = 0;
-        nBusRd = 0;
-        nBusRdX = 0;
-        nBusUpgr = 0;
+       // nBusRd = 0;
+       // nBusRdX = 0;
+       // nBusUpgr = 0;
     }
 
     void SetNumberofCores(short nNumberofCOres)
     {
         NumberofCores = nNumberofCOres;
         CacheState = new State[NumberofCores];
+        nBusRd = new long[NumberofCores];
+        nBusRdX = new long[NumberofCores];
+        nBusUpgr = new long[NumberofCores];
     }
 
     bool BusSnoop(int writer, int addr, Function CacheAction)
@@ -279,17 +284,17 @@ public:
             case F_READ:
                 cout<< "Cache Action Read"<<endl;
                 Port_BusValid.write(F_READ);
-                nBusRd++;
+                nBusRd[writer]++;
                 break;
             case F_READEx:
                 cout<< "Cache Action ReadEX"<<endl;
                 Port_BusValid.write(F_READEx);
-                nBusRdX++;
+                nBusRdX[writer]++;
                 break;
             case F_WRITE:
                 cout<< "Cache Action Upgrd"<<endl;
                 Port_BusValid.write(F_WRITE);
-                nBusUpgr++;
+                nBusUpgr[writer]++;
                 break;
             default:
                 cout<< "Cache Action defualt"<<endl;
@@ -349,13 +354,13 @@ public:
 
     virtual bool Flush()
     {
-       // wait(100);
+        // wait(100);
         return false;
     }
 
     virtual void SetCacheState(int writer, State nSt)
     {
-       // cout<< "Set Cache State"<< endl;
+        // cout<< "Set Cache State"<< endl;
         CacheState[writer] = nSt;
     }
 
@@ -371,14 +376,27 @@ public:
     /* Bus output. */
     void output(){
         /* Write output as specified in the assignment. */
-        double avg = (double)waits / double(nBusRd + nBusRdX + nBusUpgr);
-        printf("\n 2. Main memory access rates\n");
-        printf("    Bus had %ld BusRd and %ld BusRdX and %ld BusUpgr.\n", nBusRd, nBusRdX, nBusUpgr);
-        printf("    A total of %ld accesses.\n", nBusRd + nBusRdX + nBusUpgr);
+        long nTot_BusRd = 0,
+            nTot_BusRdX = 0,
+            nTot_BusUpgr = 0;
+
+        for(int index = 0; index < NumberofCores; index++)
+        {
+            nTot_BusRd = nTot_BusRd + nBusRd[index];
+            nTot_BusRdX = nTot_BusRdX + nBusRdX[index];
+            nTot_BusUpgr = nTot_BusUpgr + nBusUpgr[index];
+        }
+
+        double avg = (double)waits / double(nTot_BusRd + nTot_BusRdX + nTot_BusUpgr);
+        printf("\n 1.    BusRd - BusRdEx - BusUpgr\n");
+        for(int index = 0; index < NumberofCores; index++)
+            printf("Core%d   %ld   %ld   %ld\n", index,nBusRd[index], nBusRdX[index],nBusUpgr[index]);
+        printf("Total   %ld   %ld   %ld\n", nTot_BusRd, nTot_BusRdX, nTot_BusUpgr);
+        printf("\n 2.    A total number of %ld accesses.\n", nTot_BusRd + nTot_BusRdX+ nTot_BusUpgr);
+        printf("Snoop Hits:%.0f     Snoop Miss:%.0f\n", nSnoopHit, nSnoopMiss);
         printf("\n 3. Average time for bus acquisition\n");
         printf("    There were %ld waits for the bus.\n", waits);
         printf("    Average waiting time per access: %f cycles.\n", avg);
-        cout<<"Time stamp: "<<sc_time_stamp()<<endl;
     }
 
     void WriteEvent()
@@ -429,6 +447,8 @@ public:
         SC_THREAD(execute);
         sensitive << Port_CLK.pos();
     }
+
+
 
 
 private:
@@ -491,7 +511,7 @@ private:
                     break;
                 case F_READEx:  //BusRdX
                 case F_WRITE:   //BusUpgr
-                        set_.SetState(index, tag , S_Invalid);
+                    set_.SetState(index, tag , S_Invalid);
                     break;
                 default:
                     break;
@@ -939,12 +959,13 @@ int sc_main(int argc, char* argv[])
         stats_print();
         total_avg_print();
         cout << endl;
-        cout<< "Number of SnoopHits: "<< nSnoopHit<< "  and Number of SnoopMiss: "<< nSnoopMiss<<endl;
-        cout << "Avarage mem access time:" << (hitRate + nSnoopHit + (missRate - nSnoopHit) * 100) / (hitRate + missRate) << endl;
-        cout << endl;
 
         // OutPut information about the Bus
         bus.output();
+        cout << endl <<"4. Avarage mem access time:" << (hitRate + nSnoopHit + (missRate - nSnoopHit) * 100) / (hitRate + missRate) << endl;
+        cout << endl<< "5. Total execution time: "<< sc_time_stamp()<<endl;
+
+
 
 
         //sc_close_vcd_trace_file(wf);
@@ -963,28 +984,28 @@ int sc_main(int argc, char* argv[])
 
 void total_avg_print()
 {
-  printf("\n");
+    printf("\n");
 
-  stats_total.Reads   = stats_total.RHit + stats_total.RMiss;
-  stats_total.Writes  = stats_total.WHit + stats_total.WMiss;
-  stats_total.HitRate =  ((double) stats_total.RHit + (double) stats_total.WHit) / (double) (stats_total.Reads + stats_total.Writes);
+    stats_total.Reads   = stats_total.RHit + stats_total.RMiss;
+    stats_total.Writes  = stats_total.WHit + stats_total.WMiss;
+    stats_total.HitRate =  ((double) stats_total.RHit + (double) stats_total.WHit) / (double) (stats_total.Reads + stats_total.Writes);
 
-  printf("%s\t%d\t%d\t%d\t%d\t%d\t%d\t%f\n", "TOT: ",
-    stats_total.Reads,
-    stats_total.RHit,
-    stats_total.RMiss,
-    stats_total.Writes,
-    stats_total.WHit,
-    stats_total.WMiss,
-    stats_total.HitRate);
+    printf("%s\t%d\t%d\t%d\t%d\t%d\t%d\t%f\n", "TOT: ",
+           stats_total.Reads,
+           stats_total.RHit,
+           stats_total.RMiss,
+           stats_total.Writes,
+           stats_total.WHit,
+           stats_total.WMiss,
+           stats_total.HitRate);
 
-  printf("%s\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%f\n", "AVG: ",
-    (double) stats_total.Reads    / (double) num_cpus,
-    (double) stats_total.RHit     / (double) num_cpus,
-    (double) stats_total.RMiss    / (double) num_cpus,
-    (double) stats_total.Writes   / (double) num_cpus,
-    (double) stats_total.WHit     / (double) num_cpus,
-    (double) stats_total.WMiss    / (double) num_cpus,
-    (double) stats_total.HitRate  / (double) num_cpus);
+    printf("%s\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%f\n", "AVG: ",
+           (double) stats_total.Reads    / (double) num_cpus,
+           (double) stats_total.RHit     / (double) num_cpus,
+           (double) stats_total.RMiss    / (double) num_cpus,
+           (double) stats_total.Writes   / (double) num_cpus,
+           (double) stats_total.WHit     / (double) num_cpus,
+           (double) stats_total.WMiss    / (double) num_cpus,
+           (double) stats_total.HitRate  / (double) num_cpus);
 
 }
