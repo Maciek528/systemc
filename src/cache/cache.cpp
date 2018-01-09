@@ -110,7 +110,6 @@ public:
             Set[nCOunt].Set_Number = nCOunt;
             for(int nIndex = 0; nIndex < n_Set_Association; nIndex++)
             {
-
                 Set[nCOunt].Tag[nIndex]         = -1;
                 Set[nCOunt].Data[nIndex]        = -1;
                 Set[nCOunt].state[nIndex]       =  S_Invalid ; //At the begining every state is invalid
@@ -139,7 +138,6 @@ public:
                 {
                     return true;
                 }
-
             }
 
             if(Set[SetNumber].TimeStamp[LineNumber] < ShortestTime)
@@ -163,7 +161,6 @@ public:
         Set[SetNumber].Data[LineNumber]     = Data;
         Set[SetNumber].state[LineNumber]    = sta;
         Set[SetNumber].TimeStamp[LineNumber] = sc_time_stamp().to_double();
-
     };
 
     void SetState(short SetNumber, int Tag, State sta )
@@ -197,8 +194,6 @@ public:
         }
         return Set[SetNumber].state[LineNumber];
     }
-
-
 
 };
 
@@ -436,10 +431,8 @@ public:
     sc_out<bool>       Port_HitMiss;
 
 
-
     // has to be added when no standard constructor SC_CTOR is used
     SC_HAS_PROCESS(Cache);
-
 
     // Custom constructor
     Cache(sc_module_name nm, int pid): sc_module(nm), pid_(pid) {
@@ -449,15 +442,11 @@ public:
     }
 
 
-
-
 private:
     /* Core Number*/
     int pid_;
     /* Set Variable is Private Member of Cache, so different Threads can access it*/
     Cache_L1 set_;
-
-    //sc_mutex SnoopMutex;
 
     int getIndex (int address) {
         return (address & 0x0000FE0) >> 5;
@@ -611,7 +600,6 @@ private:
                 }
                 else
                 {
-
                     stats_writemiss(pid_);
                     stats_total.WMiss++;
                     Port_HitMiss.write(false);
@@ -623,7 +611,6 @@ private:
                 //cout<< "writing CPU WRITING DONE: "<<endl;
                 Port_CpuDone.write( RET_WRITE_DONE );
             }
-
         }
     }
 };
@@ -846,16 +833,13 @@ protected:  //Only for VCD TraceFile purpose-> public
     void execute()
     {
         logger << "[PU" << pid_ << "] [execute] " << "start" << endl;
-
     }
 };
 
 int sc_main(int argc, char* argv[])
 {
-
     // Variables
     int num_procs = -1;
-
 
     try
     {
@@ -876,7 +860,6 @@ int sc_main(int argc, char* argv[])
         // The clock that will drive the PU's, CPU and Cache
         sc_clock clk;
 
-
         logger << "[main] " << "clock created" << endl;
         logger << "[main] " << "num_proc: " << tracefile_ptr->get_proc_count() << endl;
 
@@ -884,9 +867,6 @@ int sc_main(int argc, char* argv[])
         // sc_signal<int>        sigBusWriter;
         sc_buffer<int, SC_MANY_WRITERS >   sigBusWriter;
         sc_buffer<Function, SC_MANY_WRITERS> sigBusValid;
-
-
-
 
         // Create Bus
         Bus         bus("bus");
@@ -896,7 +876,6 @@ int sc_main(int argc, char* argv[])
         // General Port_BusBus Signals
         bus.Port_BusWriter(sigBusWriter);
         bus.Port_BusValid(sigBusValid);
-
 
         // Create a vector of pointers to processing units
         std::vector<ProcessingUnit*> processingUnits;
@@ -916,10 +895,8 @@ int sc_main(int argc, char* argv[])
             processingUnits.push_back(processingUnit);
         }
 
-
         logger << "[main] "  << "processingUnits created" << endl;
         logger << "[main] "  << "processingUnits.size(): " << processingUnits.size() << endl;
-
         logger << "[main] " << "Processing unit patched with clock" << endl;
 
         hitRate = 0;
@@ -928,7 +905,6 @@ int sc_main(int argc, char* argv[])
         nSnoopMiss = 0;
 
         logger << "[main] " << "hitmissrate defined" << endl;
-
 
         cout << "Running (press CTRL+C to interrupt)... " << endl;
 
@@ -965,9 +941,6 @@ int sc_main(int argc, char* argv[])
         cout << endl <<"4. Avarage mem access time:" << (hitRate + nSnoopHit + (missRate - nSnoopHit) * 100) / (hitRate + missRate) << endl;
         cout << endl<< "5. Total execution time: "<< sc_time_stamp()<<endl;
 
-
-
-
         //sc_close_vcd_trace_file(wf);
     }
 
@@ -979,7 +952,6 @@ int sc_main(int argc, char* argv[])
     logger.close();
     return 0;
 }
-
 
 
 void total_avg_print()
